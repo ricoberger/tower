@@ -13,13 +13,16 @@ import (
 
 	"github.com/ricoberger/tower/internal/config"
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/prompt"
 	"github.com/ricoberger/tower/internal/reconcile"
 	"github.com/ricoberger/tower/internal/source"
 )
 
 const (
-	defaultTick  = time.Second
-	fetchTimeout = 15 * time.Second
+	defaultTick = time.Second
+	// defaultFetchTimeout is the independent end-to-end budget of each
+	// source poll.
+	defaultFetchTimeout = source.FetchTimeout
 )
 
 type engineOptions struct {
@@ -33,6 +36,30 @@ type engineOptions struct {
 	pollInterval time.Duration
 	// logMaxBytes overrides the log rotation size in tests.
 	logMaxBytes int64
+	// fetchTimeout overrides the per-source poll budget in tests.
+	fetchTimeout time.Duration
+	// Test overrides: sources replaces the sources built from the
+	// configuration; tickC and pollC replace the tickers; hooks observe the
+	// engine loop.
+	sources []source.Source
+	tickC   <-chan time.Time
+	pollC   <-chan time.Time
+	hooks   engineHooks
+}
+
+// engineHooks are called by the engine loop (tests only).
+type engineHooks struct {
+	roundStarted func()
+	roundApplied func()
+	pollSkipped  func()
+	ticked       func()
+	pruneApplied func()
+}
+
+func call(f func()) {
+	if f != nil {
+		f()
+	}
 }
 
 type cachedItem struct {
@@ -40,9 +67,24 @@ type cachedItem struct {
 	alert  *source.Alert
 }
 
+// sourceStatus is the health and latest applied snapshot of a source. It is
+// only accessed by the engine loop.
 type sourceStatus struct {
 	snapshot reconcile.Snapshot
-	lastErr  string
+	// lastSuccess is the completion time of the latest successful poll (zero
+	// if the source never succeeded) and lastErr the sanitized error of the
+	// latest poll ("" after a success).
+	lastSuccess time.Time
+	lastErr     string
+}
+
+// pollResult is the outcome of one source poll within a round.
+type pollResult struct {
+	source string
+	alerts []source.Alert
+	err    error
+	// at is the completion time of the poll.
+	at time.Time
 }
 
 type engine struct {
@@ -54,7 +96,14 @@ type engine struct {
 	unreadable map[string]item.Stamp
 	sources    []source.Source
 	status     map[string]*sourceStatus
+	meta       map[string]prompt.AlertMeta
 	pruned     chan []string
+	// rounds delivers the combined result of a background poll round;
+	// inFlight is true from the start of a round until the loop applied it.
+	rounds       chan []pollResult
+	inFlight     bool
+	fetchTimeout time.Duration
+	hooks        engineHooks
 }
 
 // runEngine runs the headless engine until ctx is cancelled.
@@ -71,6 +120,9 @@ func runEngine(ctx context.Context, opts engineOptions) error {
 	}
 	if opts.logMaxBytes <= 0 {
 		opts.logMaxBytes = logMaxBytes
+	}
+	if opts.fetchTimeout <= 0 {
+		opts.fetchTimeout = defaultFetchTimeout
 	}
 
 	findings := config.CheckExecutables(cfg, opts.lookPath)
@@ -98,14 +150,18 @@ func runEngine(ctx context.Context, opts engineOptions) error {
 	logger := newLogger(lw, opts.stderr, opts.level)
 
 	e := &engine{
-		cfg:        cfg,
-		store:      store,
-		log:        logger,
-		now:        func() time.Time { return opts.now().UTC().Truncate(time.Second) },
-		items:      map[string]*cachedItem{},
-		unreadable: map[string]item.Stamp{},
-		status:     map[string]*sourceStatus{},
-		pruned:     make(chan []string, 1),
+		cfg:          cfg,
+		store:        store,
+		log:          logger,
+		now:          func() time.Time { return opts.now().UTC().Truncate(time.Second) },
+		items:        map[string]*cachedItem{},
+		unreadable:   map[string]item.Stamp{},
+		status:       map[string]*sourceStatus{},
+		meta:         map[string]prompt.AlertMeta{},
+		pruned:       make(chan []string, 1),
+		rounds:       make(chan []pollResult, 1),
+		fetchTimeout: opts.fetchTimeout,
+		hooks:        opts.hooks,
 	}
 	return e.run(ctx, opts, findings)
 }
@@ -117,36 +173,51 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 		e.log.Warn(findings.GhosttyCommand)
 	}
 	for _, s := range e.cfg.Sources {
+		e.meta[s.Name] = prompt.MetaFor(s)
 		switch s.Type {
 		case config.SourceFile:
 			e.sources = append(e.sources, source.NewFile(s.Name, s.Path))
-			e.status[s.Name] = &sourceStatus{snapshot: reconcile.Snapshot{Source: s.Name}}
 		case config.SourceAlertmanager:
-			e.log.Warn("alertmanager polling is not available in this version; the source is inactive and its items are left untouched", "source", s.Name)
+			e.sources = append(e.sources, source.NewAlertmanager(s))
 			if s.GrafanaInstance == "" {
 				e.log.Warn("alertmanager source without grafana_instance: the skill will have no Grafana instance and may stop as blocked", "source", s.Name)
 			}
 		}
+	}
+	if opts.sources != nil {
+		e.sources = opts.sources
+	}
+	for _, src := range e.sources {
+		e.status[src.Name()] = &sourceStatus{snapshot: reconcile.Snapshot{Source: src.Name()}}
 	}
 
 	e.refresh()
 	e.log.Info("items loaded", "items", len(e.items), "unreadable_items", len(e.unreadable))
 
 	var wg sync.WaitGroup
-	pruneCtx, cancelPrune := context.WithCancel(ctx)
+	bgCtx, cancelBg := context.WithCancel(ctx)
 	defer func() {
-		cancelPrune()
+		// Cancel outstanding polls and credential commands; their cleanup
+		// is bounded (CredentialWaitDelay), not their remaining budget.
+		cancelBg()
 		wg.Wait()
 	}()
-	wg.Go(func() { e.pruneOnce(pruneCtx) })
+	wg.Go(func() { e.pruneOnce(bgCtx) })
 
-	e.pollAll(ctx)
-	e.reconcile()
+	// The startup round runs in the background like every later round.
+	e.startRound(bgCtx, &wg)
 
-	pollTicker := time.NewTicker(opts.pollInterval)
-	defer pollTicker.Stop()
-	tick := time.NewTicker(opts.tick)
-	defer tick.Stop()
+	tickC, pollC := opts.tickC, opts.pollC
+	if pollC == nil {
+		pollTicker := time.NewTicker(opts.pollInterval)
+		defer pollTicker.Stop()
+		pollC = pollTicker.C
+	}
+	if tickC == nil {
+		tick := time.NewTicker(opts.tick)
+		defer tick.Stop()
+		tickC = tick.C
+	}
 
 	for {
 		select {
@@ -157,15 +228,91 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 			for _, id := range ids {
 				delete(e.items, id)
 			}
-		case <-pollTicker.C:
+			call(e.hooks.pruneApplied)
+		case results := <-e.rounds:
+			e.applyRound(results)
+			e.inFlight = false
 			e.refresh()
-			e.pollAll(ctx)
 			e.reconcile()
-		case <-tick.C:
+			call(e.hooks.roundApplied)
+		case <-pollC:
+			if e.inFlight {
+				e.log.Debug("poll skipped: the previous poll round is still running")
+				call(e.hooks.pollSkipped)
+				continue
+			}
+			e.startRound(bgCtx, &wg)
+		case <-tickC:
+			// Timer ticks only use the snapshots of already applied rounds.
 			e.refresh()
 			e.reconcile()
+			call(e.hooks.ticked)
 		}
 	}
+}
+
+// startRound polls all sources concurrently in the background, one goroutine
+// per source with its own budget, and delivers their combined result over
+// e.rounds once every poll completed or timed out. Poll workers never touch
+// engine state.
+func (e *engine) startRound(ctx context.Context, wg *sync.WaitGroup) {
+	e.inFlight = true
+	sources := slices.Clone(e.sources)
+	now, timeout := e.now, e.fetchTimeout
+	wg.Go(func() {
+		results := make([]pollResult, len(sources))
+		var polls sync.WaitGroup
+		for i, src := range sources {
+			polls.Go(func() {
+				fctx, cancel := context.WithTimeout(ctx, timeout)
+				alerts, err := src.Fetch(fctx)
+				cancel()
+				results[i] = pollResult{source: src.Name(), alerts: alerts, err: err, at: now()}
+			})
+		}
+		polls.Wait()
+		// e.rounds has room for the only round in flight; the select
+		// never blocks a stopped engine.
+		select {
+		case e.rounds <- results:
+		case <-ctx.Done():
+		}
+	})
+	call(e.hooks.roundStarted)
+}
+
+// applyRound updates the cached snapshots and health of all sources from a
+// completed round. It runs on the engine loop only.
+func (e *engine) applyRound(results []pollResult) {
+	for _, r := range results {
+		st := e.status[r.source]
+		if st == nil {
+			continue
+		}
+		if r.err != nil {
+			st.snapshot.OK = false
+			st.lastErr = r.err.Error()
+			e.log.Warn("source poll failed", "source", r.source, "error", st.lastErr,
+				"last_success", formatSuccess(st.lastSuccess))
+			continue
+		}
+		prevErr := st.lastErr
+		st.lastErr = ""
+		st.lastSuccess = r.at
+		st.snapshot = reconcile.Snapshot{Source: r.source, OK: true, ObservedAt: r.at, Alerts: r.alerts}
+		if prevErr != "" {
+			e.log.Info("source recovered", "source", r.source, "last_success", formatSuccess(st.lastSuccess), "previous_error", prevErr)
+		}
+		e.log.Debug("source polled", "source", r.source, "alerts", len(r.alerts), "last_success", formatSuccess(st.lastSuccess))
+	}
+}
+
+// formatSuccess renders a last successful poll time, or "never".
+func formatSuccess(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	return t.Format(time.RFC3339)
 }
 
 // refresh synchronizes the in-memory items with the disk, reloading items
@@ -223,26 +370,25 @@ func (e *engine) load(id string, st item.Stamp) {
 		}
 	}
 	e.items[id] = c
+	e.initMarkdown(id, c)
 }
 
-func (e *engine) pollAll(ctx context.Context) {
-	for _, src := range e.sources {
-		st := e.status[src.Name()]
-		fctx, cancel := context.WithTimeout(ctx, fetchTimeout)
-		alerts, err := src.Fetch(fctx)
-		cancel()
-		if err != nil {
-			st.snapshot.OK = false
-			st.lastErr = err.Error()
-			e.log.Warn("source poll failed", "source", src.Name(), "error", err)
-			continue
-		}
-		if st.lastErr != "" {
-			e.log.Info("source recovered", "source", src.Name())
-			st.lastErr = ""
-		}
-		st.snapshot = reconcile.Snapshot{Source: src.Name(), OK: true, ObservedAt: e.now(), Alerts: alerts}
-		e.log.Debug("source polled", "source", src.Name(), "alerts", len(alerts))
+// initMarkdown creates a missing alert.md of a readable item from its stored
+// alert.json and its currently configured source. It changes no other file,
+// never replaces an existing alert.md and never resolves credentials. Items
+// without a decodable stored alert or configured source are skipped.
+func (e *engine) initMarkdown(id string, c *cachedItem) {
+	meta, ok := e.meta[c.loaded.Item.Source.Name]
+	if c.alert == nil || !ok {
+		return
+	}
+	written, err := e.store.InitAlertMarkdown(id, prompt.AlertMarkdown(*c.alert, meta))
+	if err != nil {
+		e.log.Error("initialize alert.md", "item_id", id, "source", c.loaded.Item.Source.Name, "error", err)
+		return
+	}
+	if written {
+		e.log.Info("initialized missing alert.md", "item_id", id, "source", c.loaded.Item.Source.Name)
 	}
 }
 
@@ -297,7 +443,11 @@ func (e *engine) apply(res reconcile.Result) {
 func (e *engine) applyChange(ch reconcile.Change) error {
 	if ch.Create {
 		it := ch.Item
-		return e.store.Create(&it, ch.RawAlert)
+		if err := e.store.Create(&it, ch.RawAlert); err != nil {
+			return err
+		}
+		e.writeMarkdown(ch)
+		return nil
 	}
 	if _, err := e.store.Update(ch.ItemID, func(disk *item.Item) error {
 		*disk = *mergeChange(disk, ch)
@@ -309,6 +459,7 @@ func (e *engine) applyChange(ch reconcile.Change) error {
 		if err := e.store.WriteRawAlert(ch.ItemID, ch.RawAlert); err != nil {
 			return fmt.Errorf("write alert.json: %w", err)
 		}
+		e.writeMarkdown(ch)
 	}
 	for _, r := range ch.Runs {
 		if err := e.store.WriteRun(ch.ItemID, r); err != nil {
@@ -316,6 +467,30 @@ func (e *engine) applyChange(ch reconcile.Change) error {
 		}
 	}
 	return nil
+}
+
+// writeMarkdown renders alert.md from the raw alert of a change, i.e. when
+// alert.json is written. Failures are logged and never abort the change; a
+// stale alert.md is removed so that it is initialized again from alert.json.
+func (e *engine) writeMarkdown(ch reconcile.Change) {
+	if ch.RawAlert == nil {
+		return
+	}
+	name := ch.Item.Source.Name
+	meta, ok := e.meta[name]
+	if !ok {
+		return
+	}
+	a, err := source.DecodeAlert(name, ch.RawAlert)
+	if err == nil {
+		err = e.store.WriteAlertMarkdown(ch.ItemID, prompt.AlertMarkdown(a, meta))
+	}
+	if err != nil {
+		e.log.Error("write alert.md", "item_id", ch.ItemID, "source", name, "error", err)
+		if !ch.Create {
+			_ = e.store.RemoveAlertMarkdown(ch.ItemID)
+		}
+	}
 }
 
 // mergeChange merges a reconciliation change into the latest on-disk item

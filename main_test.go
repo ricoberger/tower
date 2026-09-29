@@ -90,9 +90,19 @@ const fixtureAlert = `{
   "receivers": [{"name": "team"}]
 }`
 
-// setup writes a config with a file source into a new temp directory.
+// setup writes a config with a file source and a local fake Alertmanager
+// source into a new temp directory.
 func setup(t *testing.T, extra string) (dir, cfgPath, fixture, stateDir string) {
 	t.Helper()
+	dir, cfgPath, fixture, stateDir, _ = setupAM(t, extra)
+	return
+}
+
+// setupAM is setup that also returns the fake Alertmanager of the "legacy"
+// source.
+func setupAM(t *testing.T, extra string) (dir, cfgPath, fixture, stateDir string, am *fakeAlertmanager) {
+	t.Helper()
+	am = newFakeAlertmanager(t)
 	dir = t.TempDir()
 	cfgPath = filepath.Join(dir, "config.yaml")
 	fixture = filepath.Join(dir, "alerts.json")
@@ -104,7 +114,7 @@ sources:
     path: ./alerts.json
   - name: legacy
     type: alertmanager
-    url: https://alertmanager.example.com
+    url: ` + am.URL + `
     auth:
       type: bearer
       token: $TOWER_TEST_TOKEN
@@ -431,7 +441,7 @@ func TestApplyChangeKeepsTimestampsMonotonic(t *testing.T) {
 }
 
 func TestEngineIntegration(t *testing.T) {
-	dir, cfgPath, fixture, stateDir := setup(t, "ghostty:\n  command: /nonexistent/ghostty-new\nretention:\n  done_after: 24h\n")
+	dir, cfgPath, fixture, stateDir, am := setupAM(t, "ghostty:\n  command: /nonexistent/ghostty-new\nretention:\n  done_after: 24h\n")
 	vars := map[string]string{"TOWER_TEST_TOKEN": credentialSentinel}
 	cfg := loadCfg(t, cfgPath, vars)
 
@@ -585,10 +595,18 @@ func TestEngineIntegration(t *testing.T) {
 		t.Fatal("corrupt item modified")
 	}
 	errOut := stderr.String()
-	for _, want := range []string{"level=INFO msg=transition", "to=queued", "unreadable_items=1", "skipping unreadable item", "alertmanager polling is not available", "ghostty.command", "pruned done item"} {
+	for _, want := range []string{"level=INFO msg=transition", "to=queued", "unreadable_items=1", "skipping unreadable item", "alertmanager source without grafana_instance", "ghostty.command", "pruned done item"} {
 		if !strings.Contains(errOut, want) {
 			t.Errorf("stderr lacks %q", want)
 		}
+	}
+	// The Alertmanager source is polled with its credential.
+	if strings.Contains(errOut, "polling is not available") || am.requests() == 0 || am.lastAuth() != "Bearer "+credentialSentinel {
+		t.Errorf("alertmanager source not polled: requests=%d", am.requests())
+	}
+	// Items get alert.md.
+	if md, err := os.ReadFile(filepath.Join(stateDir, "items", id, "alert.md")); err != nil || !strings.HasPrefix(string(md), "# KubePodCrashLooping\n") { // #nosec G304 -- test file
+		t.Errorf("alert.md = %q, %v", md, err)
 	}
 
 	// tower.log is valid JSON with levels and context.
@@ -633,6 +651,7 @@ func TestEngineIntegration(t *testing.T) {
 	for p, want := range map[string]os.FileMode{
 		stateDir: 0o700, filepath.Join(stateDir, "tower.log"): 0o600, filepath.Join(stateDir, "tower.lock"): 0o600,
 		filepath.Join(stateDir, "items", id): 0o700, filepath.Join(stateDir, "items", id, "item.yaml"): 0o600,
+		filepath.Join(stateDir, "items", id, "alert.md"): 0o600,
 	} {
 		fi, err := os.Stat(p)
 		if err != nil || fi.Mode().Perm() != want {
