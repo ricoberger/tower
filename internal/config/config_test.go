@@ -205,6 +205,82 @@ func TestStrictDecoding(t *testing.T) {
 	}
 }
 
+// TestRejectWrongTypes verifies that YAML value types are enforced before
+// the decoder's lenient conversions, without echoing values (review round 1,
+// B2).
+func TestRejectWrongTypes(t *testing.T) {
+	const secret = "4242.4242"
+	tests := []struct{ name, content, field string }{
+		{"fractional integer", "runs:\n  concurrency: 1.9\n", "runs.concurrency: must be an integer"},
+		{"string integer", "runs:\n  concurrency: \"2\"\n", "runs.concurrency: must be an integer"},
+		{"string boolean", "notifications:\n  enabled: \"yes\"\n", "notifications.enabled: must be a boolean"},
+		{"integer boolean", "notifications:\n  enabled: 1\n", "notifications.enabled: must be a boolean"},
+		{"numeric path", "prompts:\n  alert: 123\n", "prompts.alert: must be a string"},
+		{"boolean editor", "editor: true\n", "editor: must be a string"},
+		{"boolean argument", "runs:\n  args: [true]\n", "runs.args[0]: must be a string"},
+		{"numeric list element", "alerts:\n  severity_order: [critical, 1]\n", "alerts.severity_order[1]: must be a string"},
+		{"null list element", "runs:\n  resume_args: [a, null]\n", "runs.resume_args[1]: must be a string"},
+		{"integer duration", "runs:\n  timeout: 60\n", "runs.timeout: must be a string"},
+		{"mapping instead of list", "runs:\n  args: {a: b}\n", "runs.args: must be a list"},
+		{"scalar instead of mapping", "alerts: soon\n", "alerts: must be a mapping"},
+		{"numeric token", "sources:\n  - {name: a, type: alertmanager, url: u, auth: {type: bearer, token: " + secret + "}}\n", "sources[0].auth.token: must be a string"},
+		{"numeric source name", "sources:\n  - {name: 7, type: file, path: x}\n", "sources[0].name: must be a string"},
+		{"null source", "sources:\n  - null\n", "sources[0]: must be a mapping"},
+		{"list document", "- a\n", "configuration: must be a mapping"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := tt.content
+			switch {
+			case strings.HasPrefix(content, "- "): // whole document
+			case strings.HasPrefix(content, "sources:"):
+				content = "state_dir: /s\n" + content
+			default:
+				content = "state_dir: /s\n" + minimalSources + content
+			}
+			_, _, err := Load(writeConfig(t, content), envMap(map[string]string{"HOME": "/h"}))
+			if err == nil {
+				t.Fatal("wrong type accepted")
+			}
+			if !strings.Contains(err.Error(), tt.field) {
+				t.Fatalf("error %q does not contain %q", err, tt.field)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatal("error discloses the configured value")
+			}
+		})
+	}
+	t.Run("correct types and nulls are accepted", func(t *testing.T) {
+		cfg, report := load(t, "state_dir: /s\n"+minimalSources+"runs:\n  concurrency: 3\n  args: [\"1\", x]\n  model: null\nnotifications:\n  enabled: false\n", nil)
+		if !report.OK() || cfg.Runs.Concurrency != 3 || cfg.Notifications.Enabled || cfg.Runs.Args[0] != "1" {
+			t.Fatalf("report = %+v, cfg = %+v", report, cfg.Runs)
+		}
+	})
+}
+
+// TestRejectExtraDocuments verifies that exactly one YAML document is read
+// (review round 1, B3).
+func TestRejectExtraDocuments(t *testing.T) {
+	for name, trailer := range map[string]string{
+		"second document":        "---\nbogus: true\n",
+		"empty second document":  "---\n",
+		"malformed second":       "---\n: : [\n",
+		"repeated configuration": "---\n" + minimalSources,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := Load(writeConfig(t, "state_dir: /s\n"+minimalSources+trailer), envMap(nil))
+			if err == nil {
+				t.Fatal("accepted content after the configuration document")
+			}
+		})
+	}
+	t.Run("leading document marker is fine", func(t *testing.T) {
+		if _, report := load(t, "---\nstate_dir: /s\n"+minimalSources, nil); !report.OK() {
+			t.Fatalf("report = %+v", report)
+		}
+	})
+}
+
 func TestNativeFieldsNotInterpolated(t *testing.T) {
 	env := map[string]string{"HOME": "/h", "N": "3", "B": "false"}
 	if _, _, err := Load(writeConfig(t, minimalSources+"runs:\n  concurrency: $N\n"), envMap(env)); err == nil {
@@ -569,7 +645,7 @@ func TestValidation(t *testing.T) {
 		{"basic without password", base + "sources:\n  - {name: a, type: alertmanager, url: u, auth: {type: basic, username: x}}\n", "exactly one of password"},
 		{"unknown auth", base + "sources:\n  - {name: a, type: alertmanager, url: u, auth: {type: oauth}}\n", "auth.type"},
 		{"malformed duration", base + minimalSources + "alerts:\n  reopen_window: 1 day\n", "alerts.reopen_window: invalid duration"},
-		{"duration without unit", base + minimalSources + "runs:\n  timeout: 60\n", "runs.timeout: invalid duration"},
+		{"duration without unit", base + minimalSources + "runs:\n  timeout: \"60\"\n", "runs.timeout: invalid duration"},
 		{"placement", base + minimalSources + "ghostty:\n  placement: pane\n", "ghostty.placement"},
 	}
 	for _, tt := range tests {
