@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"encoding/json"
+	"maps"
 	"reflect"
 	"slices"
 	"testing"
@@ -786,6 +787,56 @@ func doneAfterResolution(t *testing.T) (*sim, source.Alert, time.Time) {
 	wantState(t, s.get(id1), item.StateDone)
 	s.items[id1].Item.Seen = true
 	return s, a, resolvedAt
+}
+
+// TestCurrentItemIsHighestExtant verifies that the current item is the
+// highest-numbered present item, not the counter's high-water mark (review
+// round 1, B4).
+func TestCurrentItemIsHighestExtant(t *testing.T) {
+	k := item.Key{Source: "dev", Fingerprint: "fp1"}
+	t.Run("T11 after a pruned newer item links the present item", func(t *testing.T) {
+		s, a, resolvedAt := doneAfterResolution(t)
+		s.counters[k] = 2 // item 2 existed and was pruned
+		now := resolvedAt.Add(cfg.ReopenWindow + time.Second)
+		s.step(now, []Snapshot{snap("dev", now, a)})
+		it := s.get("alert-dev-fp1-3")
+		if it.PreviousItem == nil || *it.PreviousItem != id1 {
+			t.Fatalf("previous_item = %v, want %s", it.PreviousItem, id1)
+		}
+		if _, ok := s.items["alert-dev-fp1-2"]; ok {
+			t.Fatal("reused a pruned id")
+		}
+	})
+	t.Run("T10 reopens the present item after a pruned newer item", func(t *testing.T) {
+		s, a, resolvedAt := doneAfterResolution(t)
+		s.counters[k] = 2
+		now := resolvedAt.Add(time.Hour)
+		s.step(now, []Snapshot{snap("dev", now, a)})
+		if len(s.items) != 1 || s.get(id1).Alert.Occurrences != 2 {
+			t.Fatalf("items = %v", slices.Collect(maps.Keys(s.items)))
+		}
+	})
+	t.Run("active present item is updated, not duplicated", func(t *testing.T) {
+		s, a := newYoung(t)
+		s.counters[k] = 5
+		now := t0.Add(time.Minute)
+		res := s.step(now, []Snapshot{snap("dev", now, a)})
+		if len(s.items) != 1 || len(res.Changes) != 1 || res.Changes[0].ItemID != id1 {
+			t.Fatalf("changes = %+v", res.Changes)
+		}
+	})
+	t.Run("highest of several present items is current", func(t *testing.T) {
+		s, a, resolvedAt := doneAfterResolution(t)
+		now := resolvedAt.Add(cfg.ReopenWindow + time.Second)
+		s.step(now, []Snapshot{snap("dev", now, a)}) // T11 creates item 2
+		wantState(t, s.get("alert-dev-fp1-2"), item.StateQueued)
+		later := now.Add(time.Minute)
+		res := s.step(later, []Snapshot{snap("dev", later)})
+		wantState(t, s.get("alert-dev-fp1-2"), item.StateResolved)
+		if len(res.Changes) != 1 || res.Changes[0].ItemID != "alert-dev-fp1-2" {
+			t.Fatalf("changes = %+v", res.Changes)
+		}
+	})
 }
 
 func TestT10T11DoneReopen(t *testing.T) {

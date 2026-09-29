@@ -190,12 +190,16 @@ func Reconcile(in Input) Result {
 			p.counters[k] = max(p.counters[k], n)
 		}
 	}
-	// The current item of a key is the item with the highest number ever
-	// used. If that item is missing (pruned) or unreadable, the key has no
-	// usable current item.
+	// The current item of a key is its highest-numbered extant (loaded)
+	// item, independent of the durable counter: the counter only allocates
+	// never-used IDs, so pruning or losing a newer item makes the next older
+	// present item current again. Unreadable items are not part of the input
+	// and only reserve their numbers through the counter.
+	currentN := map[item.Key]int{}
 	for _, w := range p.works {
 		k := w.it.Key()
-		if _, n, err := item.ParseID(w.it.ID); err == nil && n == p.counters[k] {
+		if _, n, err := item.ParseID(w.it.ID); err == nil && n > currentN[k] {
+			currentN[k] = n
 			p.current[k] = w
 		}
 	}
