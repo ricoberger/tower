@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -272,16 +273,41 @@ func Load(path string, env LookupEnv) (*Config, Report, error) {
 		return nil, report, fmt.Errorf("read configuration file %s: %w", abs, err)
 	}
 
-	var raw rawConfig
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	dec.KnownFields(true)
-	if err := dec.Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
+	raw, err := decodeRaw(data)
+	if err != nil {
 		return nil, report, fmt.Errorf("parse configuration file %s: %w", abs, err)
 	}
 
-	cfg := build(&raw, abs, env, &report)
+	cfg := build(raw, abs, env, &report)
 	validate(cfg, &report)
 	return cfg, report, nil
+}
+
+// decodeRaw parses exactly one YAML document. It rejects additional
+// documents, values of the wrong YAML type and unknown keys.
+func decodeRaw(data []byte) (*rawConfig, error) {
+	var doc yaml.Node
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	if err := dec.Decode(&doc); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("line %d: only a single YAML document is allowed", extra.Line)
+	}
+	if err := checkTypes(&doc, reflect.TypeFor[rawConfig]()); err != nil {
+		return nil, err
+	}
+	var raw rawConfig
+	strict := yaml.NewDecoder(bytes.NewReader(data))
+	strict.KnownFields(true)
+	if err := strict.Decode(&raw); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return &raw, nil
 }
 
 // builder carries state while converting the raw configuration.
