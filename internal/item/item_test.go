@@ -199,10 +199,10 @@ func TestDeriveOccurrenceBase(t *testing.T) {
 		want    int
 	}{
 		{"created only", []HistoryEntry{tr(0, "", StateNew)}, runs, 3, 0},
-		{"T10 reopen", []HistoryEntry{tr(0, "", StateNew), tr(5, StateResolved, StateDone), tr(20, StateDone, StateNew)}, runs, 3, 2},
-		{"latest T9 wins", []HistoryEntry{tr(0, "", StateNew), tr(5, StateResolved, StateNew), tr(25, StateResolved, StateNew)}, runs, 3, 2},
-		{"T9 restoring needs-you is no start", []HistoryEntry{tr(0, "", StateNew), tr(20, StateResolved, StateNeedsYou)}, runs, 3, 0},
-		{"T6 into new is no start", []HistoryEntry{tr(0, "", StateNew), tr(20, StateSnoozed, StateNew)}, runs, 3, 0},
+		{"reopened from done", []HistoryEntry{tr(0, "", StateNew), tr(5, StateResolved, StateDone), tr(20, StateDone, StateNew)}, runs, 3, 2},
+		{"latest reopen from resolved wins", []HistoryEntry{tr(0, "", StateNew), tr(5, StateResolved, StateNew), tr(25, StateResolved, StateNew)}, runs, 3, 2},
+		{"reopen restoring needs-you is no start", []HistoryEntry{tr(0, "", StateNew), tr(20, StateResolved, StateNeedsYou)}, runs, 3, 0},
+		{"unsnooze into new is no start", []HistoryEntry{tr(0, "", StateNew), tr(20, StateSnoozed, StateNew)}, runs, 3, 0},
 		{"actions ignored", []HistoryEntry{tr(0, "", StateNew), tr(5, StateDone, StateNew), {At: at(40), Action: ActionDismissed}}, runs, 3, 1},
 		{"start evicted", []HistoryEntry{tr(20, StateNew, StateQueued)}, runs, 3, 0},
 		{"capped at current", []HistoryEntry{tr(50, StateDone, StateNew)}, runs, 2, 2},
@@ -778,7 +778,7 @@ func TestCountersSurvivePruneAndRestart(t *testing.T) {
 }
 
 // TestPruneSkipsItemsWithUnreadableRuns verifies that pruning uses the same
-// readability rules as loading (review round 1, B1).
+// readability rules as loading.
 func TestPruneSkipsItemsWithUnreadableRuns(t *testing.T) {
 	s := openStore(t)
 	cutoff := t0.Add(time.Hour)

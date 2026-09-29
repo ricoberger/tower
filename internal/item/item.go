@@ -165,7 +165,8 @@ type RunsInfo struct {
 	// PendingReason is set while the item is queued.
 	PendingReason *RunReason `yaml:"pending_reason"`
 	// OccurrenceBase is the value of Current when the current alert
-	// occurrence started (creation, or a reopen into new by T9/T10). Runs
+	// occurrence started (creation, or a reopen of a resolved or done item
+	// into new). Runs
 	// numbered above it belong to the current occurrence. It is kept
 	// separately from the bounded history so that evicting old history
 	// entries never changes occurrence identity. Internal bookkeeping.
@@ -372,7 +373,7 @@ func (it *Item) Validate(id string) error {
 }
 
 // OccurrenceStarts reports whether a transition from -> to starts a new
-// alert occurrence: creation into new, T9 reopening into new, or T10.
+// alert occurrence: creation, or reopening a resolved or done item into new.
 func OccurrenceStarts(from, to State) bool {
 	return to == StateNew && (from == "" || from == StateResolved || from == StateDone)
 }

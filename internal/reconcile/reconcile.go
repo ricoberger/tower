@@ -1,6 +1,40 @@
-// Package reconcile implements the alert item lifecycle (T1–T14) as a pure
-// function of persisted items, source snapshots, synthetic runner/user events
-// and the current time.
+// Package reconcile implements the alert item lifecycle as a pure function of
+// persisted items, source snapshots, synthetic runner/user events and the
+// current time.
+//
+// An item follows its alert (identified by source and fingerprint) through
+// these rules:
+//
+//   - Create: a firing alert without a current item creates one in new, or
+//     in snoozed if the alert is suppressed. Unprocessed alerts are ignored.
+//   - Automatic preparation: a new item whose alert has been firing for at
+//     least prepare_after is queued, once per alert occurrence.
+//   - Run started / run finished: the runner moves a queued item to
+//     preparing, and a finished run (ready, blocked, failed) moves a
+//     preparing item to needs-you. A snoozed or resolved item keeps its state
+//     and the result; a done item is never revived.
+//   - Snooze: a suppressed alert moves new, queued, preparing and needs-you
+//     items to snoozed; a queued run is cancelled, a running run may finish.
+//   - Unsnooze: a snoozed item whose alert fires unsuppressed again is
+//     restored to preparing (run executing), needs-you (run finished in this
+//     occurrence) or new.
+//   - Resolve: an alert absent from a successful poll resolves any
+//     non-terminal item and cancels a queued run.
+//   - Linger expiry: an item resolved for resolved_linger becomes done and a
+//     running run is cancelled.
+//   - Reopen resolved: a resolved item whose alert fires again is restored
+//     like unsnooze and counts a new occurrence.
+//   - Reopen done: a done item whose alert fires again within reopen_window
+//     of its resolution returns to new as a new occurrence (not dismissed,
+//     unseen); after the window a follow-up item linked through
+//     previous_item is created instead.
+//   - Dismiss: the user moves any non-terminal item to done, cancelling its
+//     queued or running run.
+//   - Dismissed while firing: a dismissed done item whose alert never
+//     resolved stays done; its first absence records the resolution, after
+//     which reopen done applies.
+//   - Manual run: the user queues a run for a new, needs-you, snoozed or
+//     resolved item regardless of prepare_after.
 package reconcile
 
 import (
@@ -49,13 +83,13 @@ type EventKind string
 
 // Event kinds.
 const (
-	// EventDismiss is a user dismissal (T12).
+	// EventDismiss is a user dismissal.
 	EventDismiss EventKind = "dismiss"
-	// EventManualRun is a user request for a manual run (T14).
+	// EventManualRun is a user request for a manual run.
 	EventManualRun EventKind = "manual-run"
-	// EventRunStarted reports that the runner started a queued run (T3).
+	// EventRunStarted reports that the runner started a queued run.
 	EventRunStarted EventKind = "run-started"
-	// EventRunFinished reports that a run ended (T4).
+	// EventRunFinished reports that a run ended.
 	EventRunFinished EventKind = "run-finished"
 )
 
@@ -109,7 +143,8 @@ type Change struct {
 	Item item.Item
 	// Appended are the history entries added in this pass.
 	Appended []item.HistoryEntry
-	// SeenChanged is true when this pass changed Item.Seen (T10).
+	// SeenChanged is true when this pass changed Item.Seen (reopening a done
+	// item marks it unseen).
 	SeenChanged bool
 	// RawAlert is the raw alert to write to alert.json, if it changed.
 	RawAlert json.RawMessage
@@ -258,8 +293,8 @@ func (p *pass) touch(w *work) {
 func (p *pass) transition(w *work, to item.State, reason string) {
 	e := item.HistoryEntry{At: p.now, From: w.it.State, To: to, Reason: reason}
 	if item.OccurrenceStarts(w.it.State, to) {
-		// A new occurrence starts (T1, T9 into new, T10): only runs created
-		// from now on count as its preparation.
+		// A new occurrence starts (creation, or a reopen into new): only runs
+		// created from now on count as its preparation.
 		base := w.it.Runs.Current
 		w.it.Runs.OccurrenceBase = &base
 	}
@@ -320,7 +355,8 @@ func (w *work) startedInOccurrence() bool {
 	return false
 }
 
-// restoreTarget is the state restored by T6/T9.
+// restoreTarget is the state restored by unsnoozing or reopening a resolved
+// item.
 func (w *work) restoreTarget() item.State {
 	if _, ok := w.executing(); ok {
 		return item.StatePreparing
@@ -352,7 +388,7 @@ func (p *pass) event(ev Event) {
 	}
 	it := w.it
 	switch ev.Kind {
-	case EventDismiss: // T12
+	case EventDismiss:
 		if !nonterminal(it.State) {
 			p.ignore(ev, "item is already done")
 			return
@@ -369,7 +405,7 @@ func (p *pass) event(ev Event) {
 			p.effect(Effect{Kind: EffectCancelRunning, ItemID: it.ID, Run: n})
 		}
 
-	case EventManualRun: // T14
+	case EventManualRun:
 		switch it.State {
 		case item.StateNew, item.StateNeedsYou, item.StateSnoozed, item.StateResolved:
 		default:
@@ -387,7 +423,7 @@ func (p *pass) event(ev Event) {
 		p.transition(w, item.StateQueued, "manual run requested")
 		p.effect(Effect{Kind: EffectEnqueue, ItemID: it.ID, Run: next, Reason: item.ReasonManual})
 
-	case EventRunStarted: // T3
+	case EventRunStarted:
 		r := ev.Run
 		if it.State != item.StateQueued || r.Number != it.Runs.Current+1 {
 			p.ignore(ev, "item is not queued for this run")
@@ -405,7 +441,7 @@ func (p *pass) event(ev Event) {
 		w.runWrites = append(w.runWrites, r.Clone())
 		p.transition(w, item.StatePreparing, fmt.Sprintf("run %d started", r.Number))
 
-	case EventRunFinished: // T4
+	case EventRunFinished:
 		r := ev.Run
 		if r.Number < 1 || r.Number > it.Runs.Current {
 			p.ignore(ev, "unknown run")
@@ -461,7 +497,8 @@ func (p *pass) snapshot(s Snapshot) {
 	}
 }
 
-// create applies T1 (or the new-item part of T11), followed by T2 when the
+// create creates an item (for a new alert, or as the follow-up of a done item
+// reopened after the reopen window) and queues automatic preparation when the
 // alert is active and already eligible.
 func (p *pass) create(k item.Key, a source.Alert, observedAt time.Time, previous *string, reason string) {
 	n := p.counters[k] + 1
@@ -556,7 +593,7 @@ func cloneAlert(a source.Alert) source.Alert {
 	return c
 }
 
-// maybePrepare applies T2.
+// maybePrepare queues automatic preparation when the item is due for it.
 func (p *pass) maybePrepare(w *work, a source.Alert) {
 	it := w.it
 	if it.State != item.StateNew || !a.Active() || it.Runs.PendingReason != nil {
@@ -584,7 +621,8 @@ func (p *pass) present(w *work, a source.Alert, observedAt time.Time) {
 	switch it.State {
 	case item.StateDone:
 		if prevStatus != item.AlertResolved || it.Alert.ResolvedAt == nil {
-			// T13: no resolution since dismissal: only refresh metadata.
+			// Dismissed while firing: no resolution since dismissal, so only
+			// refresh metadata.
 			p.refresh(w, a, observedAt)
 			return
 		}
@@ -592,7 +630,7 @@ func (p *pass) present(w *work, a source.Alert, observedAt time.Time) {
 			return // a suppressed re-fire of a resolved done item is left alone
 		}
 		if p.now.Sub(*it.Alert.ResolvedAt) <= p.in.Config.ReopenWindow {
-			// T10
+			// Reopen within the reopen window.
 			p.refresh(w, a, observedAt)
 			it.Alert.Occurrences++
 			it.Alert.ResolvedAt = nil
@@ -603,7 +641,7 @@ func (p *pass) present(w *work, a source.Alert, observedAt time.Time) {
 			p.maybePrepare(w, a)
 			return
 		}
-		// T11
+		// Reopened after the reopen window: create a follow-up item.
 		prev := it.ID
 		p.create(it.Key(), a, observedAt, &prev, fmt.Sprintf("alert firing again after the reopen window (previous item %s)", prev))
 
@@ -611,7 +649,7 @@ func (p *pass) present(w *work, a source.Alert, observedAt time.Time) {
 		if !a.Active() {
 			return // suppressed while resolved: no rule applies, linger paused
 		}
-		// T9
+		// Reopen a resolved item.
 		p.refresh(w, a, observedAt)
 		it.Alert.Occurrences++
 		it.Alert.ResolvedAt = nil
@@ -621,7 +659,7 @@ func (p *pass) present(w *work, a source.Alert, observedAt time.Time) {
 	case item.StateSnoozed:
 		p.refresh(w, a, observedAt)
 		if a.Active() {
-			// T6
+			// Unsnooze.
 			p.transition(w, w.restoreTarget(), "alert no longer suppressed")
 			p.maybePrepare(w, a)
 		}
@@ -629,7 +667,7 @@ func (p *pass) present(w *work, a source.Alert, observedAt time.Time) {
 	default: // new, queued, preparing, needs-you
 		p.refresh(w, a, observedAt)
 		if a.Suppressed() && prevStatus != item.AlertSuppressed {
-			// T5: only a new suppression event; an unchanged suppression
+			// Snooze on a new suppression only; an unchanged suppression
 			// keeps a manual run requested from snoozed.
 			wasQueued := it.State == item.StateQueued
 			p.transition(w, item.StateSnoozed, "alert suppressed")
@@ -652,11 +690,11 @@ func (p *pass) absent(w *work) {
 		it.Alert.Status = item.AlertResolved
 		it.Alert.ResolvedAt = &now
 		if it.State == item.StateDone {
-			// T13: record the resolution, stay done.
+			// Dismissed while firing: record the resolution, stay done.
 			p.touch(w)
 			return
 		}
-		// T7
+		// Resolve.
 		wasQueued := it.State == item.StateQueued
 		p.transition(w, item.StateResolved, "alert no longer firing")
 		if wasQueued {
@@ -665,7 +703,7 @@ func (p *pass) absent(w *work) {
 		}
 		return
 	}
-	// T8
+	// Linger expiry.
 	if it.State != item.StateResolved || it.Alert.ResolvedAt == nil {
 		return
 	}

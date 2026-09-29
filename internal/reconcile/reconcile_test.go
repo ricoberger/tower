@@ -264,8 +264,8 @@ func resolvedItem(t *testing.T) (*sim, source.Alert) {
 	return s, a
 }
 
-func TestT1Create(t *testing.T) {
-	t.Run("T1 active creates new", func(t *testing.T) {
+func TestCreate(t *testing.T) {
+	t.Run("active alert creates new", func(t *testing.T) {
 		s := newSim(t)
 		a := alert(t, "dev", "fp1", "active", t0, nil)
 		res := s.step(t0, []Snapshot{snap("dev", t0, a)})
@@ -289,7 +289,7 @@ func TestT1Create(t *testing.T) {
 		}
 		s.assertStable(t0, snap("dev", t0, a))
 	})
-	t.Run("T1 suppressed creates snoozed without preparation", func(t *testing.T) {
+	t.Run("suppressed alert creates snoozed without preparation", func(t *testing.T) {
 		s := newSim(t)
 		res := s.step(t0, []Snapshot{snap("dev", t0, alert(t, "dev", "fp1", "suppressed", t0.Add(-time.Hour), nil))})
 		it := s.get(id1)
@@ -298,7 +298,7 @@ func TestT1Create(t *testing.T) {
 			t.Fatalf("item = %+v effects = %+v", it, res.Effects)
 		}
 	})
-	t.Run("T1 inhibited despite active state creates snoozed", func(t *testing.T) {
+	t.Run("inhibited alert despite active state creates snoozed", func(t *testing.T) {
 		s := newSim(t)
 		a := alert(t, "dev", "fp1", "active", t0.Add(-time.Hour), nil)
 		a.InhibitedBy = []string{"x"}
@@ -308,14 +308,14 @@ func TestT1Create(t *testing.T) {
 			t.Fatal("suppressed alert must not be prepared")
 		}
 	})
-	t.Run("T1 unprocessed creates nothing", func(t *testing.T) {
+	t.Run("unprocessed alert creates nothing", func(t *testing.T) {
 		s := newSim(t)
 		res := s.step(t0, []Snapshot{snap("dev", t0, alert(t, "dev", "fp1", "unprocessed", t0.Add(-time.Hour), nil))})
 		if len(res.Changes) != 0 || len(s.items) != 0 {
 			t.Fatalf("result = %+v", res)
 		}
 	})
-	t.Run("T1 uses next never-used id", func(t *testing.T) {
+	t.Run("uses next never-used id", func(t *testing.T) {
 		s := newSim(t)
 		s.counters[item.Key{Source: "dev", Fingerprint: "fp1"}] = 7 // pruned or unreadable items 1..7
 		s.step(t0, []Snapshot{snap("dev", t0, alert(t, "dev", "fp1", "active", t0, nil))})
@@ -324,7 +324,7 @@ func TestT1Create(t *testing.T) {
 			t.Fatal("no previous_item when the prior item is not present")
 		}
 	})
-	t.Run("T1 isolates keys by source", func(t *testing.T) {
+	t.Run("isolates keys by source", func(t *testing.T) {
 		s := newSim(t)
 		s.step(t0, []Snapshot{
 			snap("dev", t0, alert(t, "dev", "fp1", "active", t0, nil)),
@@ -339,8 +339,8 @@ func TestT1Create(t *testing.T) {
 	})
 }
 
-func TestT2AutomaticPreparation(t *testing.T) {
-	t.Run("T1+T2 in one pass for an already-old alert", func(t *testing.T) {
+func TestAutomaticPreparation(t *testing.T) {
+	t.Run("create and prepare in one pass for an already-old alert", func(t *testing.T) {
 		s := newSim(t)
 		a := alert(t, "dev", "fp1", "active", t0.Add(-time.Hour), nil)
 		res := s.step(t0, []Snapshot{snap("dev", t0, a)})
@@ -363,7 +363,7 @@ func TestT2AutomaticPreparation(t *testing.T) {
 			}
 		}
 	})
-	t.Run("T2 threshold boundary on timer ticks", func(t *testing.T) {
+	t.Run("threshold boundary on timer ticks", func(t *testing.T) {
 		s, a := newYoung(t)
 		poll := snap("dev", t0, a)
 		// Tick just before the threshold: nothing.
@@ -383,7 +383,7 @@ func TestT2AutomaticPreparation(t *testing.T) {
 			t.Fatalf("last_seen_at = %v", it.Alert.LastSeenAt)
 		}
 	})
-	t.Run("T2 measured from current starts_at", func(t *testing.T) {
+	t.Run("measured from current starts_at", func(t *testing.T) {
 		s, _ := newYoung(t)
 		later := alert(t, "dev", "fp1", "active", t0.Add(3*time.Minute), nil)
 		s.step(t0.Add(6*time.Minute), []Snapshot{snap("dev", t0.Add(6*time.Minute), later)})
@@ -391,7 +391,7 @@ func TestT2AutomaticPreparation(t *testing.T) {
 		s.step(t0.Add(8*time.Minute), []Snapshot{snap("dev", t0.Add(8*time.Minute), later)})
 		wantState(t, s.get(id1), item.StateQueued)
 	})
-	t.Run("T2 at most once after a completed run", func(t *testing.T) {
+	t.Run("at most once after a completed run", func(t *testing.T) {
 		s, a := needsYouItem(t)
 		// Suppress and reactivate: restores needs-you, no new enqueue.
 		sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
@@ -402,7 +402,7 @@ func TestT2AutomaticPreparation(t *testing.T) {
 			t.Fatalf("effects = %+v", res.Effects)
 		}
 	})
-	t.Run("T2 blocked while a run of the occurrence exists even if interrupted", func(t *testing.T) {
+	t.Run("blocked while a run of the occurrence exists even if interrupted", func(t *testing.T) {
 		s, a := preparingItem(t)
 		sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
 		s.step(t0.Add(2*time.Second), []Snapshot{snap("dev", t0.Add(2*time.Second), sup)})
@@ -415,7 +415,7 @@ func TestT2AutomaticPreparation(t *testing.T) {
 	})
 }
 
-func TestT3RunStarted(t *testing.T) {
+func TestRunStarted(t *testing.T) {
 	s, _ := queuedItem(t)
 	res := s.step(t0.Add(time.Second), nil, started(id1, 2, t0))
 	if len(res.Ignored) != 1 || len(res.Changes) != 0 {
@@ -437,9 +437,9 @@ func TestT3RunStarted(t *testing.T) {
 	}
 }
 
-func TestT4RunFinished(t *testing.T) {
+func TestRunFinished(t *testing.T) {
 	for _, o := range []item.Outcome{item.OutcomeReady, item.OutcomeBlocked, item.OutcomeFailed} {
-		t.Run("T4 preparing "+string(o), func(t *testing.T) {
+		t.Run("preparing becomes needs-you for "+string(o), func(t *testing.T) {
 			s, _ := preparingItem(t)
 			res := s.step(t0.Add(time.Minute), nil, finished(id1, 1, t0, t0.Add(time.Minute), o, item.ReasonAuto))
 			wantState(t, s.get(id1), item.StateNeedsYou)
@@ -451,7 +451,7 @@ func TestT4RunFinished(t *testing.T) {
 				t.Fatal("outcome not saved")
 			}
 		})
-		t.Run("T4 snoozed retains "+string(o), func(t *testing.T) {
+		t.Run("snoozed retains "+string(o), func(t *testing.T) {
 			s, a := preparingItem(t)
 			sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
 			res := s.step(t0.Add(2*time.Second), []Snapshot{snap("dev", t0.Add(2*time.Second), sup)})
@@ -465,7 +465,7 @@ func TestT4RunFinished(t *testing.T) {
 				t.Fatalf("result = %+v", res)
 			}
 		})
-		t.Run("T4 resolved retains "+string(o), func(t *testing.T) {
+		t.Run("resolved retains "+string(o), func(t *testing.T) {
 			s, _ := preparingItem(t)
 			res := s.step(t0.Add(2*time.Second), []Snapshot{snap("dev", t0.Add(2*time.Second))})
 			wantState(t, s.get(id1), item.StateResolved)
@@ -479,7 +479,7 @@ func TestT4RunFinished(t *testing.T) {
 			}
 		})
 	}
-	t.Run("T4 does not revive done", func(t *testing.T) {
+	t.Run("does not revive done", func(t *testing.T) {
 		s, _ := preparingItem(t)
 		s.step(t0.Add(2*time.Second), nil, ev(EventDismiss, id1))
 		res := s.step(t0.Add(time.Minute), nil, finished(id1, 1, t0, t0.Add(time.Minute), item.OutcomeCancelled, item.ReasonAuto))
@@ -488,7 +488,7 @@ func TestT4RunFinished(t *testing.T) {
 			t.Fatalf("result = %+v", res)
 		}
 	})
-	t.Run("T4 not for cancelled or interrupted", func(t *testing.T) {
+	t.Run("not for cancelled or interrupted", func(t *testing.T) {
 		for _, o := range []item.Outcome{item.OutcomeCancelled, item.OutcomeInterrupted} {
 			s, _ := preparingItem(t)
 			res := s.step(t0.Add(time.Minute), nil, finished(id1, 1, t0, t0.Add(time.Minute), o, item.ReasonAuto))
@@ -498,7 +498,7 @@ func TestT4RunFinished(t *testing.T) {
 			}
 		}
 	})
-	t.Run("T4 unknown run ignored", func(t *testing.T) {
+	t.Run("unknown run ignored", func(t *testing.T) {
 		s, _ := preparingItem(t)
 		res := s.step(t0.Add(time.Minute), nil, finished(id1, 5, t0, t0.Add(time.Minute), item.OutcomeReady, item.ReasonAuto))
 		if len(res.Ignored) != 1 || len(res.Changes) != 0 {
@@ -507,7 +507,7 @@ func TestT4RunFinished(t *testing.T) {
 	})
 }
 
-func TestT5Suppression(t *testing.T) {
+func TestSnooze(t *testing.T) {
 	cases := []struct {
 		name         string
 		setup        func(t *testing.T) (*sim, source.Alert)
@@ -519,7 +519,7 @@ func TestT5Suppression(t *testing.T) {
 		{"needs-you", needsYouItem, false},
 	}
 	for _, c := range cases {
-		t.Run("T5 from "+c.name, func(t *testing.T) {
+		t.Run("from "+c.name, func(t *testing.T) {
 			s, a := c.setup(t)
 			now := t0.Add(2 * time.Minute)
 			sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
@@ -539,7 +539,7 @@ func TestT5Suppression(t *testing.T) {
 			s.assertStable(now, snap("dev", now, sup))
 		})
 	}
-	t.Run("T5 then T6 re-enqueues cancelled queued work", func(t *testing.T) {
+	t.Run("snooze then unsnooze re-enqueues cancelled queued work", func(t *testing.T) {
 		s, a := queuedItem(t)
 		sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
 		s.step(t0.Add(time.Second), []Snapshot{snap("dev", t0.Add(time.Second), sup)})
@@ -551,8 +551,8 @@ func TestT5Suppression(t *testing.T) {
 	})
 }
 
-func TestT6Unsnooze(t *testing.T) {
-	t.Run("T6 restores preparing for executing run", func(t *testing.T) {
+func TestUnsnooze(t *testing.T) {
+	t.Run("restores preparing for executing run", func(t *testing.T) {
 		s, a := preparingItem(t)
 		sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
 		s.step(t0.Add(2*time.Second), []Snapshot{snap("dev", t0.Add(2*time.Second), sup)})
@@ -569,7 +569,7 @@ func TestT6Unsnooze(t *testing.T) {
 		}
 	})
 	for _, o := range []item.Outcome{item.OutcomeReady, item.OutcomeBlocked, item.OutcomeFailed} {
-		t.Run("T6 restores needs-you for finished "+string(o), func(t *testing.T) {
+		t.Run("restores needs-you for finished "+string(o), func(t *testing.T) {
 			s, a := preparingItem(t)
 			sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
 			s.step(t0.Add(2*time.Second), []Snapshot{snap("dev", t0.Add(2*time.Second), sup)})
@@ -581,7 +581,7 @@ func TestT6Unsnooze(t *testing.T) {
 			}
 		})
 	}
-	t.Run("T6 restores new without preparation", func(t *testing.T) {
+	t.Run("restores new without preparation", func(t *testing.T) {
 		s, a := snoozedItem(t)
 		now := t0.Add(2 * time.Second)
 		res := s.step(now, []Snapshot{snap("dev", now, a)})
@@ -596,7 +596,7 @@ func TestT6Unsnooze(t *testing.T) {
 			t.Fatal("want enqueue")
 		}
 	})
-	t.Run("T6 snoozed stays snoozed while still suppressed", func(t *testing.T) {
+	t.Run("stays snoozed while still suppressed", func(t *testing.T) {
 		s, _ := snoozedItem(t)
 		sup := alert(t, "dev", "fp1", "suppressed", t0, nil)
 		res := s.step(t0.Add(time.Hour), []Snapshot{snap("dev", t0.Add(time.Hour), sup)})
@@ -607,7 +607,7 @@ func TestT6Unsnooze(t *testing.T) {
 	})
 }
 
-func TestT7Resolution(t *testing.T) {
+func TestResolve(t *testing.T) {
 	cases := []struct {
 		name         string
 		setup        func(t *testing.T) (*sim, source.Alert)
@@ -620,7 +620,7 @@ func TestT7Resolution(t *testing.T) {
 		{"snoozed", snoozedItem, false},
 	}
 	for _, c := range cases {
-		t.Run("T7 from "+c.name, func(t *testing.T) {
+		t.Run("from "+c.name, func(t *testing.T) {
 			s, _ := c.setup(t)
 			now := t0.Add(2 * time.Minute)
 			res := s.step(now, []Snapshot{snap("dev", now)}) // successful empty snapshot
@@ -646,7 +646,7 @@ func TestT7Resolution(t *testing.T) {
 			}
 		})
 	}
-	t.Run("T7 unprocessed is not absence", func(t *testing.T) {
+	t.Run("unprocessed is not absence", func(t *testing.T) {
 		s, _ := newYoung(t)
 		now := t0.Add(time.Minute)
 		res := s.step(now, []Snapshot{snap("dev", now, alert(t, "dev", "fp1", "unprocessed", t0, nil))})
@@ -658,7 +658,7 @@ func TestT7Resolution(t *testing.T) {
 }
 
 // TestUnprocessedNeutral verifies that an explicitly unprocessed alert is
-// neutral even when silencedBy/inhibitedBy are set (review round 1, B7).
+// neutral even when silencedBy/inhibitedBy are set.
 func TestUnprocessedNeutral(t *testing.T) {
 	unprocessed := func(t *testing.T, at time.Time) source.Alert {
 		a := alert(t, "dev", "fp1", "unprocessed", at, nil)
@@ -693,8 +693,8 @@ func TestUnprocessedNeutral(t *testing.T) {
 	})
 }
 
-func TestT8Linger(t *testing.T) {
-	t.Run("T8 boundary", func(t *testing.T) {
+func TestLingerExpiry(t *testing.T) {
+	t.Run("boundary", func(t *testing.T) {
 		s, _ := resolvedItem(t)
 		resolvedAt := *s.get(id1).Alert.ResolvedAt
 		empty := snap("dev", resolvedAt)
@@ -710,7 +710,7 @@ func TestT8Linger(t *testing.T) {
 		}
 		s.assertStable(resolvedAt.Add(cfg.ResolvedLinger), empty)
 	})
-	t.Run("T8 cancels executing run", func(t *testing.T) {
+	t.Run("cancels executing run", func(t *testing.T) {
 		s, _ := preparingItem(t)
 		now := t0.Add(time.Minute)
 		s.step(now, []Snapshot{snap("dev", now)})
@@ -720,7 +720,7 @@ func TestT8Linger(t *testing.T) {
 			t.Fatalf("effects = %+v", res.Effects)
 		}
 	})
-	t.Run("T8 fresh active evidence is not absence", func(t *testing.T) {
+	t.Run("fresh active evidence is not absence", func(t *testing.T) {
 		s, a := resolvedItem(t)
 		now := t0.Add(cfg.ResolvedLinger + time.Hour)
 		s.step(now, []Snapshot{snap("dev", now, a)})
@@ -730,8 +730,8 @@ func TestT8Linger(t *testing.T) {
 	})
 }
 
-func TestT9Reopen(t *testing.T) {
-	t.Run("T9 unprepared reopens new and is eligible again", func(t *testing.T) {
+func TestReopenResolved(t *testing.T) {
+	t.Run("unprepared reopens new and is eligible again", func(t *testing.T) {
 		s, _ := resolvedItem(t)
 		now := t0.Add(time.Hour)
 		old := alert(t, "dev", "fp1", "active", t0, nil)
@@ -748,7 +748,7 @@ func TestT9Reopen(t *testing.T) {
 			t.Fatalf("effects = %+v", res.Effects)
 		}
 	})
-	t.Run("T9 restores preparing without duplicate", func(t *testing.T) {
+	t.Run("restores preparing without duplicate", func(t *testing.T) {
 		s, a := preparingItem(t)
 		s.step(t0.Add(time.Minute), []Snapshot{snap("dev", t0.Add(time.Minute))})
 		now := t0.Add(time.Hour)
@@ -759,7 +759,7 @@ func TestT9Reopen(t *testing.T) {
 			t.Fatalf("result = %+v", res)
 		}
 	})
-	t.Run("T9 restores needs-you after finished preparation", func(t *testing.T) {
+	t.Run("restores needs-you after finished preparation", func(t *testing.T) {
 		s, a := needsYouItem(t)
 		s.step(t0.Add(2*time.Minute), []Snapshot{snap("dev", t0.Add(2*time.Minute))})
 		now := t0.Add(time.Hour)
@@ -769,7 +769,7 @@ func TestT9Reopen(t *testing.T) {
 			t.Fatalf("effects = %+v", res.Effects)
 		}
 	})
-	t.Run("T9 not applied for a suppressed observation", func(t *testing.T) {
+	t.Run("not applied for a suppressed observation", func(t *testing.T) {
 		s, _ := resolvedItem(t)
 		now := t0.Add(time.Hour)
 		res := s.step(now, []Snapshot{snap("dev", now, alert(t, "dev", "fp1", "suppressed", t0, nil))})
@@ -781,7 +781,7 @@ func TestT9Reopen(t *testing.T) {
 }
 
 // doneAfterResolution returns an item that was prepared (run 1 ready), then
-// resolved at t0+2m and moved to done by T8.
+// resolved at t0+2m and moved to done after resolved_linger.
 func doneAfterResolution(t *testing.T) (*sim, source.Alert, time.Time) {
 	s, a := needsYouItem(t)
 	resolvedAt := t0.Add(2 * time.Minute)
@@ -793,11 +793,10 @@ func doneAfterResolution(t *testing.T) (*sim, source.Alert, time.Time) {
 }
 
 // TestCurrentItemIsHighestExtant verifies that the current item is the
-// highest-numbered present item, not the counter's high-water mark (review
-// round 1, B4).
+// highest-numbered present item, not the counter's high-water mark.
 func TestCurrentItemIsHighestExtant(t *testing.T) {
 	k := item.Key{Source: "dev", Fingerprint: "fp1"}
-	t.Run("T11 after a pruned newer item links the present item", func(t *testing.T) {
+	t.Run("follow-up after a pruned newer item links the present item", func(t *testing.T) {
 		s, a, resolvedAt := doneAfterResolution(t)
 		s.counters[k] = 2 // item 2 existed and was pruned
 		now := resolvedAt.Add(cfg.ReopenWindow + time.Second)
@@ -810,7 +809,7 @@ func TestCurrentItemIsHighestExtant(t *testing.T) {
 			t.Fatal("reused a pruned id")
 		}
 	})
-	t.Run("T10 reopens the present item after a pruned newer item", func(t *testing.T) {
+	t.Run("reopen within window reopens the present item after a pruned newer item", func(t *testing.T) {
 		s, a, resolvedAt := doneAfterResolution(t)
 		s.counters[k] = 2
 		now := resolvedAt.Add(time.Hour)
@@ -831,7 +830,7 @@ func TestCurrentItemIsHighestExtant(t *testing.T) {
 	t.Run("highest of several present items is current", func(t *testing.T) {
 		s, a, resolvedAt := doneAfterResolution(t)
 		now := resolvedAt.Add(cfg.ReopenWindow + time.Second)
-		s.step(now, []Snapshot{snap("dev", now, a)}) // T11 creates item 2
+		s.step(now, []Snapshot{snap("dev", now, a)}) // follow-up item 2 is created
 		wantState(t, s.get("alert-dev-fp1-2"), item.StateQueued)
 		later := now.Add(time.Minute)
 		res := s.step(later, []Snapshot{snap("dev", later)})
@@ -859,12 +858,12 @@ func fillHistory(t *testing.T, s *sim, id string, at time.Time) {
 }
 
 // TestOccurrenceSurvivesHistoryEviction verifies that occurrence identity
-// does not depend on the bounded history (review round 1, B5).
+// does not depend on the bounded history.
 func TestOccurrenceSurvivesHistoryEviction(t *testing.T) {
 	reopened := func(t *testing.T) (*sim, source.Alert, time.Time) {
 		s, _, resolvedAt := doneAfterResolution(t)
 		now := resolvedAt.Add(5 * time.Hour)
-		a := alert(t, "dev", "fp1", "active", now, nil) // young: T2 not yet due
+		a := alert(t, "dev", "fp1", "active", now, nil) // young: automatic preparation not yet due
 		s.step(now, []Snapshot{snap("dev", now, a)})
 		wantState(t, s.get(id1), item.StateNew)
 		if b := s.get(id1).Runs.OccurrenceBase; b == nil || *b != 1 {
@@ -873,7 +872,7 @@ func TestOccurrenceSurvivesHistoryEviction(t *testing.T) {
 		fillHistory(t, s, id1, now)
 		return s, a, now
 	}
-	t.Run("T10 then T2 after eviction", func(t *testing.T) {
+	t.Run("reopen then automatic preparation after eviction", func(t *testing.T) {
 		s, a, now := reopened(t)
 		res := s.step(now.Add(cfg.PrepareAfter), []Snapshot{snap("dev", now, a)})
 		wantState(t, s.get(id1), item.StateQueued)
@@ -881,7 +880,7 @@ func TestOccurrenceSurvivesHistoryEviction(t *testing.T) {
 			t.Fatalf("effects = %+v", res.Effects)
 		}
 	})
-	t.Run("T6 after eviction restores new, not the old occurrence's needs-you", func(t *testing.T) {
+	t.Run("unsnooze after eviction restores new, not the old occurrence's needs-you", func(t *testing.T) {
 		s, a, now := reopened(t)
 		sup := alert(t, "dev", "fp1", "suppressed", now, nil)
 		s.step(now.Add(time.Second), []Snapshot{snap("dev", now.Add(time.Second), sup)})
@@ -942,7 +941,7 @@ func TestLegacyItemWithoutOccurrenceBase(t *testing.T) {
 			t.Fatalf("occurrence_base = %v, want %d", b, want)
 		}
 	}
-	t.Run("T10-reopened item is prepared for the new occurrence", func(t *testing.T) {
+	t.Run("item reopened from done is prepared for the new occurrence", func(t *testing.T) {
 		s, _, resolvedAt := doneAfterResolution(t)
 		now := resolvedAt.Add(5 * time.Hour)
 		a := alert(t, "dev", "fp1", "active", now, nil)
@@ -967,7 +966,7 @@ func TestLegacyItemWithoutOccurrenceBase(t *testing.T) {
 			t.Fatalf("effects = %+v", res.Effects)
 		}
 	})
-	t.Run("T10-reopened item migrated in the same step as T2", func(t *testing.T) {
+	t.Run("item reopened from done migrated in the same step as its preparation", func(t *testing.T) {
 		s, _, resolvedAt := doneAfterResolution(t)
 		now := resolvedAt.Add(5 * time.Hour)
 		a := alert(t, "dev", "fp1", "active", now, nil)
@@ -980,8 +979,8 @@ func TestLegacyItemWithoutOccurrenceBase(t *testing.T) {
 			t.Fatalf("effects = %+v", res.Effects)
 		}
 	})
-	t.Run("T9-reopened item of a later occurrence", func(t *testing.T) {
-		// done -> T10 new (base 1) -> resolved -> T9 new, all before the
+	t.Run("item reopened from resolved in a later occurrence", func(t *testing.T) {
+		// done -> reopened new (base 1) -> resolved -> reopened new, all before the
 		// second occurrence was prepared; run 1 belongs to the first one.
 		s, _, resolvedAt := doneAfterResolution(t)
 		now := resolvedAt.Add(5 * time.Hour)
@@ -1049,8 +1048,8 @@ func TestLegacyItemWithoutOccurrenceBase(t *testing.T) {
 	})
 }
 
-func TestT10T11DoneReopen(t *testing.T) {
-	t.Run("T10 at window boundary reopens and is eligible again", func(t *testing.T) {
+func TestReopenDone(t *testing.T) {
+	t.Run("at window boundary reopens and is eligible again", func(t *testing.T) {
 		s, a, resolvedAt := doneAfterResolution(t)
 		now := resolvedAt.Add(cfg.ReopenWindow)
 		res := s.step(now, []Snapshot{snap("dev", now, a)})
@@ -1070,7 +1069,7 @@ func TestT10T11DoneReopen(t *testing.T) {
 		}
 		s.assertStable(now, snap("dev", now, a))
 	})
-	t.Run("T10 clears dismissed", func(t *testing.T) {
+	t.Run("reopen clears dismissed", func(t *testing.T) {
 		s, a := newYoung(t)
 		s.step(t0.Add(time.Second), nil, ev(EventDismiss, id1))
 		s.step(t0.Add(time.Minute), []Snapshot{snap("dev", t0.Add(time.Minute))})
@@ -1082,7 +1081,7 @@ func TestT10T11DoneReopen(t *testing.T) {
 			t.Fatal("dismissed not cleared")
 		}
 	})
-	t.Run("T11 after window creates linked item", func(t *testing.T) {
+	t.Run("after window creates linked follow-up item", func(t *testing.T) {
 		s, a, resolvedAt := doneAfterResolution(t)
 		before := *s.get(id1).Clone()
 		now := resolvedAt.Add(cfg.ReopenWindow + time.Second)
@@ -1095,7 +1094,7 @@ func TestT10T11DoneReopen(t *testing.T) {
 		if it.PreviousItem == nil || *it.PreviousItem != id1 || it.Alert.Occurrences != 1 || len(res.Changes) != 1 || !res.Changes[0].Create {
 			t.Fatalf("item = %+v", it)
 		}
-		// The new item follows T1+T2 for an old alert.
+		// The follow-up item is created and prepared at once for an old alert.
 		wantState(t, it, item.StateQueued)
 		if enq := effects(res, EffectEnqueue); len(enq) != 1 || enq[0].ItemID != id2 || enq[0].Run != 1 {
 			t.Fatalf("effects = %+v", res.Effects)
@@ -1107,7 +1106,7 @@ func TestT10T11DoneReopen(t *testing.T) {
 			t.Fatalf("changes = %+v", res.Changes)
 		}
 	})
-	t.Run("T11 suppressed re-fire leaves done item alone", func(t *testing.T) {
+	t.Run("suppressed re-fire leaves done item alone", func(t *testing.T) {
 		s, _, resolvedAt := doneAfterResolution(t)
 		now := resolvedAt.Add(time.Hour)
 		res := s.step(now, []Snapshot{snap("dev", now, alert(t, "dev", "fp1", "suppressed", t0, nil))})
@@ -1117,7 +1116,7 @@ func TestT10T11DoneReopen(t *testing.T) {
 	})
 }
 
-func TestT12Dismiss(t *testing.T) {
+func TestDismiss(t *testing.T) {
 	cases := []struct {
 		name          string
 		setup         func(t *testing.T) (*sim, source.Alert)
@@ -1132,7 +1131,7 @@ func TestT12Dismiss(t *testing.T) {
 		{"resolved", resolvedItem, false, false},
 	}
 	for _, c := range cases {
-		t.Run("T12 from "+c.name, func(t *testing.T) {
+		t.Run("from "+c.name, func(t *testing.T) {
 			s, _ := c.setup(t)
 			from := s.get(id1).State
 			now := t0.Add(3 * time.Minute)
@@ -1160,7 +1159,7 @@ func TestT12Dismiss(t *testing.T) {
 	}
 }
 
-func TestT13DismissedFiring(t *testing.T) {
+func TestDismissedWhileFiring(t *testing.T) {
 	s, a := queuedItem(t)
 	s.step(t0.Add(time.Second), nil, ev(EventDismiss, id1))
 	historyLen := len(s.get(id1).History)
@@ -1191,7 +1190,7 @@ func TestT13DismissedFiring(t *testing.T) {
 	if !s.get(id1).Alert.ResolvedAt.Equal(absent) {
 		t.Fatal("resolution time reset")
 	}
-	// Only now does a later active observation reopen (T10).
+	// Only now does a later active observation reopen the item.
 	again := absent.Add(2 * time.Hour)
 	s.step(again, []Snapshot{snap("dev", again, a)})
 	if st := s.get(id1).State; st != item.StateQueued {
@@ -1199,7 +1198,7 @@ func TestT13DismissedFiring(t *testing.T) {
 	}
 }
 
-func TestT14ManualRun(t *testing.T) {
+func TestManualRun(t *testing.T) {
 	cases := []struct {
 		name    string
 		setup   func(t *testing.T) (*sim, source.Alert)
@@ -1211,7 +1210,7 @@ func TestT14ManualRun(t *testing.T) {
 		{"resolved", resolvedItem, 1},
 	}
 	for _, c := range cases {
-		t.Run("T14 from "+c.name, func(t *testing.T) {
+		t.Run("from "+c.name, func(t *testing.T) {
 			s, _ := c.setup(t)
 			from := s.get(id1).State
 			now := t0.Add(3 * time.Minute)
@@ -1234,7 +1233,7 @@ func TestT14ManualRun(t *testing.T) {
 		name  string
 		setup func(t *testing.T) (*sim, source.Alert)
 	}{{"queued", queuedItem}, {"preparing", preparingItem}} {
-		t.Run("T14 ignored in "+c.name, func(t *testing.T) {
+		t.Run("ignored in "+c.name, func(t *testing.T) {
 			s, _ := c.setup(t)
 			res := s.step(t0.Add(3*time.Minute), nil, ev(EventManualRun, id1))
 			if len(res.Ignored) != 1 || len(res.Changes) != 0 || len(res.Effects) != 0 {
@@ -1242,7 +1241,7 @@ func TestT14ManualRun(t *testing.T) {
 			}
 		})
 	}
-	t.Run("T14 ignored in done", func(t *testing.T) {
+	t.Run("ignored in done", func(t *testing.T) {
 		s, _ := newYoung(t)
 		s.step(t0.Add(time.Second), nil, ev(EventDismiss, id1))
 		res := s.step(t0.Add(2*time.Second), nil, ev(EventManualRun, id1))
@@ -1327,7 +1326,7 @@ func TestManualOverride(t *testing.T) {
 
 func TestSourceFailure(t *testing.T) {
 	failed := func(src string) Snapshot { return Snapshot{Source: src, OK: false} }
-	t.Run("freezes T2", func(t *testing.T) {
+	t.Run("freezes automatic preparation", func(t *testing.T) {
 		s, _ := newYoung(t)
 		res := s.step(t0.Add(time.Hour), []Snapshot{failed("dev")})
 		wantState(t, s.get(id1), item.StateNew)
@@ -1335,12 +1334,12 @@ func TestSourceFailure(t *testing.T) {
 			t.Fatal("frozen source changed items")
 		}
 	})
-	t.Run("freezes T7 and T8", func(t *testing.T) {
+	t.Run("freezes resolve and linger expiry", func(t *testing.T) {
 		s, _ := resolvedItem(t)
 		res := s.step(t0.Add(cfg.ResolvedLinger+time.Hour), []Snapshot{failed("dev")})
 		wantState(t, s.get(id1), item.StateResolved)
 		if len(res.Changes) != 0 {
-			t.Fatal("T8 applied for a failed source")
+			t.Fatal("linger expiry applied for a failed source")
 		}
 		s2, _ := newYoung(t)
 		s2.step(t0.Add(time.Minute), []Snapshot{failed("dev")})

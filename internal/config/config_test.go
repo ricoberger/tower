@@ -207,8 +207,7 @@ func TestStrictDecoding(t *testing.T) {
 }
 
 // TestRejectWrongTypes verifies that YAML value types are enforced before
-// the decoder's lenient conversions, without echoing values (review round 1,
-// B2).
+// the decoder's lenient conversions, without echoing values.
 func TestRejectWrongTypes(t *testing.T) {
 	const secret = "4242.4242"
 	tests := []struct{ name, content, field string }{
@@ -260,8 +259,8 @@ func TestRejectWrongTypes(t *testing.T) {
 }
 
 // TestTypeChecksCoverYAMLIndirection verifies that merge keys, aliases and
-// explicit tags cannot bypass the type checks (review round 2, B2
-// follow-up), while ordinary valid merges and aliases still work.
+// explicit tags cannot bypass the type checks, while ordinary valid merges,
+// aliases and matching standard tags still work.
 func TestTypeChecksCoverYAMLIndirection(t *testing.T) {
 	const secret = "31337.5"
 	reject := []struct{ name, content, want string }{
@@ -361,8 +360,7 @@ func TestTypeChecksCoverYAMLIndirection(t *testing.T) {
 
 // TestCyclicAliasesReturnErrors verifies that aliases referencing their own
 // ancestors produce value-free configuration errors instead of unbounded
-// recursion (review round 3, B9), and that repeated references are checked
-// in bounded time.
+// recursion, and that repeated references are checked in bounded time.
 func TestCyclicAliasesReturnErrors(t *testing.T) {
 	const secret = "31337.5"
 	for name, content := range map[string]string{
@@ -418,8 +416,7 @@ func TestCyclicAliasesReturnErrors(t *testing.T) {
 	})
 }
 
-// TestRejectExtraDocuments verifies that exactly one YAML document is read
-// (review round 1, B3).
+// TestRejectExtraDocuments verifies that exactly one YAML document is read.
 func TestRejectExtraDocuments(t *testing.T) {
 	for name, trailer := range map[string]string{
 		"second document":        "---\nbogus: true\n",
