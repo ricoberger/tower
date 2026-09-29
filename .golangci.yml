@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://golangci-lint.run/jsonschema/golangci.jsonschema.json
+---
+version: "2"
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - gosec
+    - govet
+    - ineffassign
+    - noctx
+    - staticcheck
+    - unused
+    - whitespace
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/ricoberger/tower
