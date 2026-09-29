@@ -672,3 +672,120 @@ func TestConcurrentFetchesIndependent(t *testing.T) {
 		t.Fatal("not all fetches started")
 	}
 }
+
+func TestURLUserinfoNeverSentOrLeaked(t *testing.T) {
+	const user = "syn-url-user"
+	basicValue := base64.StdEncoding.EncodeToString([]byte(user + ":" + testPassword))
+	for _, tt := range []struct {
+		name string
+		auth *config.Auth
+		want string
+	}{
+		{"omitted auth", nil, ""},
+		{"explicit none", &config.Auth{Type: config.AuthNone}, ""},
+		{"bearer", &config.Auth{Type: config.AuthBearer, Token: ptr(testToken)}, "Bearer " + testToken},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newFakeAM(t, func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+				// Echo the header and the URL login details in every form.
+				_, _ = w.Write([]byte("auth=" + r.Header.Get("Authorization") + " user=" + user + " pw=" + testPassword + " basic=" + basicValue)) // #nosec G705 -- test server echoing synthetic values
+			})
+			u := strings.Replace(srv.URL, "http://", "http://"+user+":"+testPassword+"@", 1)
+			_, err := NewAlertmanager(plainSource(u, tt.auth)).Fetch(context.Background())
+			if err == nil || !strings.Contains(err.Error(), RejectedHint) {
+				t.Fatalf("err = %v", err)
+			}
+			if got := srv.last(t).Header.Get("Authorization"); got != tt.want {
+				t.Errorf("Authorization = %q, want %q", got, tt.want)
+			}
+			assertNoLeak(t, err.Error(), user, testPassword, basicValue, testToken)
+		})
+	}
+}
+
+func TestDecodeErrorsReportNoResponseContent(t *testing.T) {
+	const marker = "SYN-BAD-TIME-MARKER"
+	label := strings.Repeat("l", 600)
+	for _, tt := range []struct {
+		name, body, want string
+	}{
+		{"timestamp after byte 512", `[{"fingerprint":"abc","labels":{"x":"` + label + `"},"startsAt":"` + marker + `","status":{"state":"active"}}]`, "decode alert 0: invalid timestamp"},
+		{"type after byte 512", `[{"fingerprint":"abc","labels":{"x":"` + label + `","` + marker + `":1},"status":{"state":"active"}}]`, "decode alert 0: unexpected JSON value type at byte offset"},
+		{"syntax after byte 512", `[{"fingerprint":"abc","labels":{"x":"` + label + `"}` + marker + `}]`, "decode alerts: invalid JSON at byte offset"},
+		{"state after byte 512", `[{"fingerprint":"abc","labels":{"x":"` + label + `"},"status":{"state":"` + marker + `"}}]`, "decode alert 0: unsupported status.state"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := newFakeAM(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tt.body)) })
+			_, err := NewAlertmanager(plainSource(srv.URL, nil)).Fetch(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "(truncated)") {
+				t.Fatalf("err = %v", err)
+			}
+			assertNoLeak(t, err.Error(), marker)
+		})
+	}
+}
+
+func TestStatusKeptWhenBodyUnreadable(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusInternalServerError} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			srv := newFakeAM(t, func(w http.ResponseWriter, _ *http.Request) {
+				// Announce more bytes than are sent: reading fails with EOF.
+				w.Header().Set("Content-Length", "1000")
+				w.WriteHeader(status)
+				_, _ = w.Write([]byte("short"))
+			})
+			_, err := NewAlertmanager(plainSource(srv.URL, nil)).Fetch(context.Background())
+			if err == nil || !strings.HasPrefix(err.Error(), "HTTP "+strconv.Itoa(status)) || !strings.Contains(err.Error(), "request failed") {
+				t.Fatalf("err = %v", err)
+			}
+			hint := status != http.StatusInternalServerError
+			if got := strings.Contains(err.Error(), RejectedHint); got != hint {
+				t.Errorf("hint present = %v, want %v: %v", got, hint, err)
+			}
+		})
+	}
+	t.Run("oversized 401", func(t *testing.T) {
+		srv := newFakeAM(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			chunk := make([]byte, 1<<20)
+			for range maxResponseBytes>>20 + 1 {
+				if _, err := w.Write(chunk); err != nil {
+					return
+				}
+			}
+		})
+		_, err := NewAlertmanager(plainSource(srv.URL, nil)).Fetch(context.Background())
+		if err == nil || !strings.HasPrefix(err.Error(), "HTTP 401: "+RejectedHint) || !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+}
+
+func TestCredentialCommandCleanupAfterShellExit(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		exit    string
+		timeout time.Duration
+		want    string
+	}{
+		// The shell exits at once; the budget expires while Wait still
+		// drains the pipe inherited by the child.
+		{"cancelled after shell exit", "exit 0", CredentialWaitDelay / 3, "deadline exceeded"},
+		// A failing shell reports its exit status instead of ErrWaitDelay.
+		{"failing shell with inherited stdout", "exit 3", time.Minute, "exit status 3"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			childPID := filepath.Join(t.TempDir(), "child")
+			ctx, cancel := context.WithTimeout(context.Background(), tt.timeout)
+			defer cancel()
+			_, err := RunCredentialCommand(ctx, "sleep 30 & echo $! > "+childPID+"; "+tt.exit)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v", err)
+			}
+			// Checked right after return: the child must already be gone.
+			pid := readPID(t, childPID)
+			assertDead(t, pid)
+		})
+	}
+}

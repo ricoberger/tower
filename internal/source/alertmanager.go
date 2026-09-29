@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -83,7 +84,7 @@ func (a *Alertmanager) Fetch(ctx context.Context) ([]Alert, error) {
 	ctx, cancel := context.WithTimeout(ctx, a.timeout)
 	defer cancel()
 
-	endpoint, err := a.endpoint()
+	endpoint, urlSecrets, err := a.endpoint()
 	if err != nil {
 		return nil, err
 	}
@@ -92,6 +93,7 @@ func (a *Alertmanager) Fetch(ctx context.Context) ([]Alert, error) {
 	if err != nil {
 		return nil, a.stageError(ctx, "resolving credentials", err)
 	}
+	secrets = append(secrets, urlSecrets...)
 	if err := ctx.Err(); err != nil {
 		return nil, a.stageError(ctx, "resolving credentials", err)
 	}
@@ -110,37 +112,85 @@ func (a *Alertmanager) Fetch(ctx context.Context) ([]Alert, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
+	// The status (and the hint for rejected credentials) is classified before
+	// the body is read, so that it survives read failures and oversized
+	// responses.
+	status := "HTTP " + strconv.Itoa(resp.StatusCode)
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		status += ": " + RejectedHint
+	}
+
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
-		return nil, a.stageError(ctx, "reading the response", redactErr(transportError(err), secrets))
+		return nil, fmt.Errorf("%s: %w", status, a.stageError(ctx, "reading the response", redactErr(transportError(err), secrets)))
 	}
 	if len(body) > maxResponseBytes {
-		return nil, fmt.Errorf("HTTP %d: response exceeds %d bytes", resp.StatusCode, maxResponseBytes)
+		return nil, fmt.Errorf("%s: response exceeds %d bytes", status, maxResponseBytes)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		msg := "HTTP " + strconv.Itoa(resp.StatusCode)
-		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-			msg += ": " + RejectedHint
-		}
-		return nil, errors.New(msg + excerpt(body, secrets))
+		return nil, errors.New(status + excerpt(body, secrets))
 	}
 	alerts, err := DecodeSnapshot(a.name, body)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP %d: %s%s", resp.StatusCode, redact(err.Error(), secrets), excerpt(body, secrets))
+		return nil, fmt.Errorf("%s: %s%s", status, decodeFailure(err), excerpt(body, secrets))
 	}
 	return alerts, nil
 }
 
-// endpoint builds the request URL. Errors never include the configured URL,
-// which may contain userinfo.
-func (a *Alertmanager) endpoint() (string, error) {
+// decodeFailure describes a snapshot decoding error by category and position
+// only. Decoder errors such as *time.ParseError quote response content, which
+// must only be reported through the bounded excerpt.
+func decodeFailure(err error) string {
+	var ade *alertDecodeError
+	if errors.As(err, &ade) {
+		return fmt.Sprintf("decode alert %d: %s", ade.index, decodeCategory(ade.err))
+	}
+	return "decode alerts: " + decodeCategory(err)
+}
+
+func decodeCategory(err error) string {
+	var (
+		syntaxErr *json.SyntaxError
+		typeErr   *json.UnmarshalTypeError
+		timeErr   *time.ParseError
+	)
+	for _, sentinel := range []error{errInvalidFingerprint, errUnsupportedState, errDuplicateFingerprint, errNotArray} {
+		if errors.Is(err, sentinel) {
+			return sentinel.Error()
+		}
+	}
+	switch {
+	case errors.As(err, &syntaxErr):
+		return fmt.Sprintf("invalid JSON at byte offset %d", syntaxErr.Offset)
+	case errors.As(err, &typeErr):
+		return fmt.Sprintf("unexpected JSON value type at byte offset %d", typeErr.Offset)
+	case errors.As(err, &timeErr):
+		return "invalid timestamp"
+	}
+	return "invalid alert data"
+}
+
+// endpoint builds the request URL and returns the values of the configured
+// URL's userinfo as secrets. The userinfo is removed from the request URL:
+// the HTTP client would otherwise send it as Basic auth whenever no
+// Authorization header is set, bypassing the configured auth (including
+// auth: none). Errors never include the configured URL.
+func (a *Alertmanager) endpoint() (string, []string, error) {
 	if a.baseURL == "" {
-		return "", errors.New("no polling url configured")
+		return "", nil, errors.New("no polling url configured")
 	}
 	u, err := url.Parse(a.baseURL)
 	if err != nil || u.Scheme == "" || u.Host == "" || u.Opaque != "" {
-		return "", errors.New("invalid polling url (expected an absolute http(s) URL)")
+		return "", nil, errors.New("invalid polling url (expected an absolute http(s) URL)")
+	}
+	var secrets []string
+	if u.User != nil {
+		user := u.User.Username()
+		pw, _ := u.User.Password()
+		enc := base64.StdEncoding.EncodeToString([]byte(user + ":" + pw))
+		secrets = []string{user, pw, u.User.String(), enc, "Basic " + enc}
+		u.User = nil
 	}
 	if a.managed != "" {
 		u = u.JoinPath("api", "alertmanager", url.PathEscape(a.managed), "api", "v2", "alerts")
@@ -161,7 +211,7 @@ func (a *Alertmanager) endpoint() (string, error) {
 	u.RawQuery = q.Encode()
 	u.Fragment = ""
 	u.RawFragment = ""
-	return u.String(), nil
+	return u.String(), secrets, nil
 }
 
 // stageError reports budget expiry and cancellation as such, independent of
@@ -279,6 +329,13 @@ func RunCredentialCommand(ctx context.Context, command string) (string, error) {
 		return "", errors.New("command could not be started")
 	}
 	err := cmd.Wait()
+	if err != nil || ctx.Err() != nil {
+		// exec stops watching ctx once the shell has exited, and a failing
+		// shell reports its exit status rather than ErrWaitDelay, so
+		// descendants (e.g. ones holding the output pipe) may still run on
+		// every failure path: kill the whole group.
+		_ = killGroup(cmd)
+	}
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
@@ -287,8 +344,7 @@ func RunCredentialCommand(ctx context.Context, command string) (string, error) {
 		switch {
 		case errors.Is(err, exec.ErrWaitDelay):
 			// The shell exited but descendants kept its output open: the
-			// output is ambiguous and the leftovers are killed.
-			_ = killGroup(cmd)
+			// output is ambiguous.
 			return "", errors.New("command left background processes holding its output")
 		case errors.As(err, &ee):
 			if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
