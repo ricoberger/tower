@@ -839,6 +839,71 @@ func TestCurrentItemIsHighestExtant(t *testing.T) {
 	})
 }
 
+// fillHistory evicts all earlier history entries by appending user actions
+// up to the history limit.
+func fillHistory(t *testing.T, s *sim, id string, at time.Time) {
+	t.Helper()
+	for range item.MaxHistory {
+		if err := s.items[id].Item.ApplyAction(item.ActionOpenedReport, 1, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, h := range s.get(id).History {
+		if !h.IsAction() {
+			t.Fatal("history still contains a transition")
+		}
+	}
+}
+
+// TestOccurrenceSurvivesHistoryEviction verifies that occurrence identity
+// does not depend on the bounded history (review round 1, B5).
+func TestOccurrenceSurvivesHistoryEviction(t *testing.T) {
+	reopened := func(t *testing.T) (*sim, source.Alert, time.Time) {
+		s, _, resolvedAt := doneAfterResolution(t)
+		now := resolvedAt.Add(5 * time.Hour)
+		a := alert(t, "dev", "fp1", "active", now, nil) // young: T2 not yet due
+		s.step(now, []Snapshot{snap("dev", now, a)})
+		wantState(t, s.get(id1), item.StateNew)
+		if s.get(id1).Runs.OccurrenceBase != 1 {
+			t.Fatalf("occurrence_base = %d, want 1", s.get(id1).Runs.OccurrenceBase)
+		}
+		fillHistory(t, s, id1, now)
+		return s, a, now
+	}
+	t.Run("T10 then T2 after eviction", func(t *testing.T) {
+		s, a, now := reopened(t)
+		res := s.step(now.Add(cfg.PrepareAfter), []Snapshot{snap("dev", now, a)})
+		wantState(t, s.get(id1), item.StateQueued)
+		if enq := effects(res, EffectEnqueue); len(enq) != 1 || enq[0].Run != 2 {
+			t.Fatalf("effects = %+v", res.Effects)
+		}
+	})
+	t.Run("T6 after eviction restores new, not the old occurrence's needs-you", func(t *testing.T) {
+		s, a, now := reopened(t)
+		sup := alert(t, "dev", "fp1", "suppressed", now, nil)
+		s.step(now.Add(time.Second), []Snapshot{snap("dev", now.Add(time.Second), sup)})
+		wantState(t, s.get(id1), item.StateSnoozed)
+		fillHistory(t, s, id1, now.Add(time.Second))
+		later := now.Add(cfg.PrepareAfter)
+		res := s.step(later, []Snapshot{snap("dev", later, a)})
+		tr := transitions(res, id1)
+		if len(tr) != 2 || tr[0].To != item.StateNew || tr[1].To != item.StateQueued {
+			t.Fatalf("transitions = %+v", tr)
+		}
+	})
+	t.Run("same occurrence stays prepared after eviction", func(t *testing.T) {
+		s, a := needsYouItem(t)
+		fillHistory(t, s, id1, t0.Add(time.Minute))
+		sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
+		s.step(t0.Add(2*time.Minute), []Snapshot{snap("dev", t0.Add(2*time.Minute), sup)})
+		res := s.step(t0.Add(3*time.Minute), []Snapshot{snap("dev", t0.Add(3*time.Minute), a)})
+		wantState(t, s.get(id1), item.StateNeedsYou)
+		if len(effects(res, EffectEnqueue)) != 0 {
+			t.Fatal("duplicate preparation after history eviction")
+		}
+	})
+}
+
 func TestT10T11DoneReopen(t *testing.T) {
 	t.Run("T10 at window boundary reopens and is eligible again", func(t *testing.T) {
 		s, a, resolvedAt := doneAfterResolution(t)

@@ -164,6 +164,13 @@ type RunsInfo struct {
 	Current int `yaml:"current"`
 	// PendingReason is set while the item is queued.
 	PendingReason *RunReason `yaml:"pending_reason"`
+	// OccurrenceBase is the value of Current when the current alert
+	// occurrence started (creation, or a reopen into new by T9/T10). Runs
+	// numbered above it belong to the current occurrence. It is kept
+	// separately from the bounded history so that evicting old history
+	// entries never changes occurrence identity. Internal bookkeeping; 0
+	// means every run belongs to the current occurrence.
+	OccurrenceBase int `yaml:"occurrence_base"`
 }
 
 // HistoryEntry is either a state transition (From, To, Reason) or a user
@@ -341,6 +348,9 @@ func (it *Item) Validate(id string) error {
 	}
 	if it.Runs.Current < 0 {
 		return errors.New("negative runs.current")
+	}
+	if it.Runs.OccurrenceBase < 0 || it.Runs.OccurrenceBase > it.Runs.Current {
+		return errors.New("runs.occurrence_base out of range")
 	}
 	if it.Runs.PendingReason != nil && !it.Runs.PendingReason.Valid() {
 		return errors.New("unsupported runs.pending_reason")

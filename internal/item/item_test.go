@@ -58,7 +58,7 @@ func TestItemRoundTrip(t *testing.T) {
 		StartsAt: t0, LastSeenAt: t0.Add(time.Minute), ResolvedAt: ptr(t0.Add(time.Hour)), Status: AlertResolved,
 		Occurrences: 3, Labels: map[string]string{"a": "b"}, GeneratorURL: "g", RunbookURL: "r",
 	}
-	full.Runs = RunsInfo{Current: 2, PendingReason: ptr(ReasonRetry)}
+	full.Runs = RunsInfo{Current: 2, PendingReason: ptr(ReasonRetry), OccurrenceBase: 1}
 	full.PreviousItem = ptr("alert-my-src-F00-11")
 	full.History = append(full.History,
 		HistoryEntry{At: t0, Action: ActionOpenedReport, Run: 2},
@@ -75,7 +75,7 @@ func TestItemRoundTrip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, field := range []string{"version: 1", "type: alert", "resolved_at:", "pending_reason:", "previous_item:", "occurrences:", "runbook_url:", "generator_url:", "last_seen_at:", "seen:", "dismissed:"} {
+			for _, field := range []string{"version: 1", "type: alert", "resolved_at:", "pending_reason:", "previous_item:", "occurrence_base:", "occurrences:", "runbook_url:", "generator_url:", "last_seen_at:", "seen:", "dismissed:"} {
 				if !strings.Contains(string(data), field) {
 					t.Errorf("missing %q in\n%s", field, data)
 				}
@@ -131,6 +131,8 @@ func TestItemValidate(t *testing.T) {
 		"status":         func(it *Item) { it.Alert.Status = "firing" },
 		"current":        func(it *Item) { it.Runs.Current = -1 },
 		"pending reason": func(it *Item) { it.Runs.PendingReason = ptr(RunReason("x")) },
+		"base negative":  func(it *Item) { it.Runs.OccurrenceBase = -1 },
+		"base > current": func(it *Item) { it.Runs.Current, it.Runs.OccurrenceBase = 1, 2 },
 		"previous":       func(it *Item) { it.PreviousItem = ptr("../../etc") },
 	}
 	for name, mutate := range cases {
