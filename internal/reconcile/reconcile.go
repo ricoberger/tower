@@ -249,6 +249,11 @@ func (p *pass) touch(w *work) {
 
 func (p *pass) transition(w *work, to item.State, reason string) {
 	e := item.HistoryEntry{At: p.now, From: w.it.State, To: to, Reason: reason}
+	if to == item.StateNew && (w.it.State == "" || w.it.State == item.StateResolved || w.it.State == item.StateDone) {
+		// A new occurrence starts (T1, T9 into new, T10): only runs created
+		// from now on count as its preparation.
+		w.it.Runs.OccurrenceBase = w.it.Runs.Current
+	}
 	w.it.State = to
 	w.it.History = item.AppendHistory(w.it.History, e)
 	w.appended = append(w.appended, e)
@@ -268,20 +273,11 @@ func (p *pass) ignore(ev Event, reason string) {
 	p.ignored = append(p.ignored, Ignored{Event: ev, Reason: reason})
 }
 
-// occurrenceStart returns the time of the latest history transition that
-// started an occurrence in which automatic preparation is (again) allowed:
-// creation, T9 reopening into new, or T10.
-func occurrenceStart(it *item.Item) time.Time {
-	for i := len(it.History) - 1; i >= 0; i-- {
-		h := it.History[i]
-		if h.IsAction() || h.To != item.StateNew {
-			continue
-		}
-		if h.From == "" || h.From == item.StateResolved || h.From == item.StateDone {
-			return h.At
-		}
-	}
-	return time.Time{}
+// inOccurrence reports whether run r belongs to the current occurrence. The
+// boundary is the durable runs.occurrence_base, not the bounded history, so
+// history eviction cannot change it.
+func inOccurrence(it *item.Item, r item.Run) bool {
+	return r.Number > it.Runs.OccurrenceBase
 }
 
 func (w *work) executing() (int, bool) {
@@ -296,9 +292,8 @@ func (w *work) executing() (int, bool) {
 // finishedInOccurrence reports whether a finished preparation (ready, blocked
 // or failed) exists for the current occurrence.
 func (w *work) finishedInOccurrence() bool {
-	start := occurrenceStart(w.it)
 	for _, r := range w.runs {
-		if r.Outcome.Finished() && !r.QueuedAt.Before(start) {
+		if r.Outcome.Finished() && inOccurrence(w.it, r) {
 			return true
 		}
 	}
@@ -308,9 +303,8 @@ func (w *work) finishedInOccurrence() bool {
 // startedInOccurrence reports whether any run was started for the current
 // occurrence. Queued work cancelled before starting has no run.
 func (w *work) startedInOccurrence() bool {
-	start := occurrenceStart(w.it)
 	for _, r := range w.runs {
-		if !r.QueuedAt.Before(start) {
+		if inOccurrence(w.it, r) {
 			return true
 		}
 	}
