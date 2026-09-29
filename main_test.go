@@ -354,7 +354,7 @@ func seedItem(t *testing.T, st *item.Store, fp string, state item.State, updated
 
 // TestApplyChangeKeepsTimestampsMonotonic verifies that applying a change
 // computed before a concurrently persisted user action keeps the history
-// chronological and never moves updated_at backwards (review round 1, B6).
+// chronological and never moves updated_at backwards.
 func TestApplyChangeKeepsTimestampsMonotonic(t *testing.T) {
 	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
 	change := func(t *testing.T, st *item.Store, id string) reconcile.Change {
@@ -535,7 +535,7 @@ func TestEngineIntegration(t *testing.T) {
 		it := readItem(t, stateDir, id)
 		return it != nil && it.State == item.StateResolved
 	})
-	// The alert fires again: T9 reopens the same item.
+	// The alert fires again: the resolved item is reopened.
 	writeFixture(t, fixture, "["+fixtureAlert+"]")
 	eventually(t, "reopened item", func() bool {
 		it := readItem(t, stateDir, id)

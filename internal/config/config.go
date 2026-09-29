@@ -65,8 +65,8 @@ type Source struct {
 
 // Auth holds polling credentials. Credential variants are pointers so that the
 // "exactly one of" rules can distinguish omitted from empty values. The
-// *_command fields are kept exactly as decoded; they are executed at request
-// time by a later milestone and never interpolated.
+// *_command fields are kept exactly as decoded; they are meant to be executed
+// at request time, never at load time, and are never interpolated.
 type Auth struct {
 	Type            string
 	Username        string
