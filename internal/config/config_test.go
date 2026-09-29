@@ -258,6 +258,76 @@ func TestRejectWrongTypes(t *testing.T) {
 	})
 }
 
+// TestTypeChecksCoverYAMLIndirection verifies that merge keys, aliases and
+// explicit tags cannot bypass the type checks (review round 2, B2
+// follow-up), while ordinary valid merges and aliases still work.
+func TestTypeChecksCoverYAMLIndirection(t *testing.T) {
+	const secret = "31337.5"
+	reject := []struct{ name, content, want string }{
+		{"merged fractional integer", "runs:\n  <<: {concurrency: 1.9}\n", "runs.concurrency: must be an integer"},
+		{"merged string boolean", "notifications:\n  <<: {enabled: \"yes\"}\n", "notifications.enabled: must be a boolean"},
+		{"merged boolean argument", "runs:\n  <<: {args: [true]}\n", "runs.args[0]: must be a string"},
+		{"merged list of mappings", "runs:\n  <<: [{model: m}, {concurrency: 1.5}]\n", "runs.concurrency: must be an integer"},
+		{"merged through alias", "ghostty: &g {command: 12}\nruns:\n  <<: *g\n", "ghostty.command: must be a string"},
+		{"merged alias with wrong type", "retention: &r {done_after: 5}\nalerts:\n  <<: *r\n", "retention.done_after: must be a string"},
+		{"merge overridden by explicit key", "runs:\n  <<: {concurrency: 1.9}\n  concurrency: 2\n", "runs.concurrency: must be an integer"},
+		{"explicit key before merge", "runs:\n  concurrency: 2\n  <<: {concurrency: 1.9}\n", "runs.concurrency: must be an integer"},
+		{"top-level merge", "<<: {editor: true}\n", "editor: must be a string"},
+		{"merge in a source", "sources:\n  - <<: {name: 5}\n    type: file\n    path: x\n", "sources[0].name: must be a string"},
+		{"merge in auth", "sources:\n  - {name: a, type: alertmanager, url: u, auth: {type: bearer, <<: {token: " + secret + "}}}\n", "sources[0].auth.token: must be a string"},
+		{"merge of a scalar", "runs:\n  <<: 5\n", "runs: must be merged from mappings only"},
+		{"nested merge", "runs:\n  <<: {<<: {concurrency: 1.9}}\n", "runs.concurrency: must be an integer"},
+		{"aliased wrong scalar", "editor: &e 1.5\nprompts:\n  alert: *e\n", "prompts.alert: must be a string"},
+		{"aliased wrong list element", "runs:\n  args: &a [true]\n  resume_args: *a\n", "runs.resume_args[0]: must be a string"},
+		{"aliased key", "editor: &k concurrency\nruns:\n  *k : 1.9\n", "runs.concurrency: must be an integer"},
+		{"explicit int tag on string", "runs:\n  concurrency: !!int '7'\n", "runs.concurrency: must be written without an explicit YAML tag"},
+		{"explicit bool tag", "notifications:\n  enabled: !!bool true\n", "notifications.enabled: must be written without an explicit YAML tag"},
+		{"explicit str tag", "editor: !!str 12\n", "editor: must be written without an explicit YAML tag"},
+		{"custom tag", "editor: !custom vim\n", "editor: must be written without an explicit YAML tag"},
+		{"tagged null", "runs:\n  model: !!null x\n", "runs.model: must be written without an explicit YAML tag"},
+		{"tagged merge value", "runs:\n  <<: !!map {concurrency: 1}\n", "runs: must be merged without an explicit YAML tag"},
+		{"tagged key", "runs:\n  !!str concurrency: 1\n", "runs: keys must be written without an explicit YAML tag"},
+		{"float tag for integer", "runs:\n  concurrency: !!float 1\n", "runs.concurrency: must be written without an explicit YAML tag"},
+		{"unquoted timestamp string", "notifications:\n  sound: 2026-01-01\n", "notifications.sound: must be a string"},
+		{"merged unknown key", "runs:\n  <<: {bogus: 1}\n", "bogus"},
+	}
+	for _, tt := range reject {
+		t.Run(tt.name, func(t *testing.T) {
+			content := tt.content
+			if !strings.HasPrefix(content, "sources:") {
+				content = minimalSources + content
+			}
+			_, _, err := Load(writeConfig(t, "state_dir: /s\n"+content), envMap(map[string]string{"HOME": "/h"}))
+			if err == nil {
+				t.Fatal("accepted")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error %q does not contain %q", err, tt.want)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatal("error discloses the configured value")
+			}
+		})
+	}
+
+	t.Run("valid merges and aliases are accepted", func(t *testing.T) {
+		content := "state_dir: /s\n" +
+			"sources:\n" +
+			"  - &src {name: a, type: file, path: a.json}\n" +
+			"  - <<: *src\n    name: b\n" +
+			"runs:\n  <<: {concurrency: 3, args: [--x]}\n  model: &m gpt\n" +
+			"notifications:\n  sound: *m\n"
+		cfg, report := load(t, content, nil)
+		if !report.OK() {
+			t.Fatalf("report = %+v", report)
+		}
+		if len(cfg.Sources) != 2 || cfg.Sources[1].Name != "b" || cfg.Sources[1].Type != "file" ||
+			cfg.Runs.Concurrency != 3 || cfg.Runs.Args[0] != "--x" || cfg.Notifications.Sound != "gpt" {
+			t.Fatalf("cfg = %+v %+v %+v", cfg.Sources, cfg.Runs, cfg.Notifications)
+		}
+	})
+}
+
 // TestRejectExtraDocuments verifies that exactly one YAML document is read
 // (review round 1, B3).
 func TestRejectExtraDocuments(t *testing.T) {
