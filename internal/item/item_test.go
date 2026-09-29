@@ -697,6 +697,40 @@ func TestCountersSurvivePruneAndRestart(t *testing.T) {
 	}
 }
 
+// TestPruneSkipsItemsWithUnreadableRuns verifies that pruning uses the same
+// readability rules as loading (review round 1, B1).
+func TestPruneSkipsItemsWithUnreadableRuns(t *testing.T) {
+	s := openStore(t)
+	cutoff := t0.Add(time.Hour)
+	it := newItem(t, key, 1)
+	it.State = StateDone
+	if err := s.Create(it, nil); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(s.ItemDir(it.ID), "runs", "1")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta := filepath.Join(runDir, "meta.yaml")
+	corrupt := []byte("{{not yaml")
+	if err := os.WriteFile(meta, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, bad, err := s.LoadAll(); err != nil || len(bad) != 1 || bad[0].ID != it.ID {
+		t.Fatalf("LoadAll must skip the item: bad=%v err=%v", bad, err)
+	}
+	cands, err := s.PruneCandidates(cutoff)
+	if err != nil || len(cands) != 0 {
+		t.Fatalf("candidates = %+v, err = %v", cands, err)
+	}
+	if deleted, err := s.PruneItem(it.ID, cutoff); deleted || err != nil {
+		t.Fatalf("deleted=%v err=%v", deleted, err)
+	}
+	if got, err := os.ReadFile(meta); err != nil || !bytes.Equal(got, corrupt) {
+		t.Fatalf("run metadata changed: %q %v", got, err)
+	}
+}
+
 func TestPruneSelection(t *testing.T) {
 	s := openStore(t)
 	cutoff := t0.Add(time.Hour)
