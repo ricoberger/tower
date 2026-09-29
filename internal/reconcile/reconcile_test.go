@@ -653,6 +653,42 @@ func TestT7Resolution(t *testing.T) {
 	})
 }
 
+// TestUnprocessedNeutral verifies that an explicitly unprocessed alert is
+// neutral even when silencedBy/inhibitedBy are set (review round 1, B7).
+func TestUnprocessedNeutral(t *testing.T) {
+	unprocessed := func(t *testing.T, at time.Time) source.Alert {
+		a := alert(t, "dev", "fp1", "unprocessed", at, nil)
+		a.SilencedBy = []string{"silence-1"}
+		a.InhibitedBy = []string{"rule-1"}
+		return a
+	}
+	t.Run("new key creates nothing", func(t *testing.T) {
+		s := newSim(t)
+		res := s.step(t0, []Snapshot{snap("dev", t0, unprocessed(t, t0.Add(-time.Hour)))})
+		if len(res.Changes) != 0 || len(res.Effects) != 0 || len(s.items) != 0 {
+			t.Fatalf("result = %+v", res)
+		}
+	})
+	t.Run("queued item is neither suppressed nor cancelled", func(t *testing.T) {
+		s, _ := queuedItem(t)
+		now := t0.Add(time.Minute)
+		res := s.step(now, []Snapshot{snap("dev", now, unprocessed(t, t0.Add(-time.Hour)))})
+		wantState(t, s.get(id1), item.StateQueued)
+		if len(res.Changes) != 0 || len(res.Effects) != 0 {
+			t.Fatalf("result = %+v", res)
+		}
+	})
+	t.Run("resolved item is not reopened or advanced", func(t *testing.T) {
+		s, _ := resolvedItem(t)
+		now := t0.Add(cfg.ResolvedLinger + time.Hour)
+		res := s.step(now, []Snapshot{snap("dev", now, unprocessed(t, t0))})
+		wantState(t, s.get(id1), item.StateResolved)
+		if len(res.Changes) != 0 {
+			t.Fatalf("result = %+v", res)
+		}
+	})
+}
+
 func TestT8Linger(t *testing.T) {
 	t.Run("T8 boundary", func(t *testing.T) {
 		s, _ := resolvedItem(t)

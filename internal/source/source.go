@@ -36,15 +36,21 @@ type Alert struct {
 	Raw          json.RawMessage
 }
 
-// Suppressed reports whether the alert is silenced or inhibited.
+// Suppressed reports whether the alert is silenced or inhibited. An
+// explicitly unprocessed alert is never suppressed, even when silencedBy or
+// inhibitedBy are set: the unprocessed state takes precedence.
 func (a Alert) Suppressed() bool {
+	if a.Unprocessed() {
+		return false
+	}
 	return a.State == StateSuppressed || len(a.SilencedBy) > 0 || len(a.InhibitedBy) > 0
 }
 
 // Unprocessed reports whether the alert is unprocessed. Unprocessed alerts are
-// neutral: they neither create items nor count as absence.
+// neutral: they neither create items, change existing items nor count as
+// absence.
 func (a Alert) Unprocessed() bool {
-	return a.State == StateUnprocessed && !a.Suppressed()
+	return a.State == StateUnprocessed
 }
 
 // Active reports whether the alert is firing and not suppressed.
