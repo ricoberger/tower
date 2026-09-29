@@ -19,6 +19,7 @@ import (
 
 	"github.com/ricoberger/tower/internal/config"
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/reconcile"
 
 	"gopkg.in/yaml.v3"
 )
@@ -349,6 +350,84 @@ func seedItem(t *testing.T, st *item.Store, fp string, state item.State, updated
 		t.Fatal(err)
 	}
 	return id
+}
+
+// TestApplyChangeKeepsTimestampsMonotonic verifies that applying a change
+// computed before a concurrently persisted user action keeps the history
+// chronological and never moves updated_at backwards (review round 1, B6).
+func TestApplyChangeKeepsTimestampsMonotonic(t *testing.T) {
+	now := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	change := func(t *testing.T, st *item.Store, id string) reconcile.Change {
+		t.Helper()
+		it, err := st.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		it.State = item.StateResolved
+		it.UpdatedAt = now
+		e := item.HistoryEntry{At: now, From: item.StateNew, To: item.StateResolved, Reason: "alert no longer firing"}
+		it.History = item.AppendHistory(it.History, e)
+		return reconcile.Change{ItemID: id, Item: *it, Appended: []item.HistoryEntry{e}}
+	}
+	chronological := func(t *testing.T, got *item.Item) {
+		t.Helper()
+		for i := 1; i < len(got.History); i++ {
+			if got.History[i].At.Before(got.History[i-1].At) {
+				t.Errorf("history out of order: %v then %v", got.History[i-1].At, got.History[i].At)
+			}
+		}
+	}
+
+	t.Run("concurrent newer action", func(t *testing.T) {
+		st, err := item.Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = st.Close() }()
+		id := seedItem(t, st, "fp1", item.StateNew, now.Add(-time.Hour))
+		ch := change(t, st, id)
+		actionAt := now.Add(time.Millisecond)
+		if _, err := st.AppendAction(id, item.ActionOpenedReport, 1, actionAt); err != nil {
+			t.Fatal(err)
+		}
+		if err := (&engine{store: st}).applyChange(ch); err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chronological(t, got)
+		if got.UpdatedAt.Before(actionAt) {
+			t.Errorf("updated_at went backwards: %v < %v", got.UpdatedAt, actionAt)
+		}
+		n := len(got.History)
+		if n < 2 || got.History[n-2].Action != item.ActionOpenedReport || got.History[n-1].To != item.StateResolved || !got.Seen {
+			t.Fatalf("concurrent action lost or transition missing: %+v", got.History)
+		}
+		if got.State != item.StateResolved {
+			t.Fatalf("state = %s", got.State)
+		}
+	})
+	t.Run("no concurrent write keeps the computed time", func(t *testing.T) {
+		st, err := item.Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = st.Close() }()
+		id := seedItem(t, st, "fp1", item.StateNew, now.Add(-time.Hour))
+		if err := (&engine{store: st}).applyChange(change(t, st, id)); err != nil {
+			t.Fatal(err)
+		}
+		got, err := st.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		chronological(t, got)
+		if !got.UpdatedAt.Equal(now) || !got.History[len(got.History)-1].At.Equal(now) {
+			t.Fatalf("updated_at = %v, history = %+v", got.UpdatedAt, got.History)
+		}
+	})
 }
 
 func TestEngineIntegration(t *testing.T) {
