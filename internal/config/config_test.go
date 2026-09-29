@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -280,14 +281,26 @@ func TestTypeChecksCoverYAMLIndirection(t *testing.T) {
 		{"aliased wrong scalar", "editor: &e 1.5\nprompts:\n  alert: *e\n", "prompts.alert: must be a string"},
 		{"aliased wrong list element", "runs:\n  args: &a [true]\n  resume_args: *a\n", "runs.resume_args[0]: must be a string"},
 		{"aliased key", "editor: &k concurrency\nruns:\n  *k : 1.9\n", "runs.concurrency: must be an integer"},
-		{"explicit int tag on string", "runs:\n  concurrency: !!int '7'\n", "runs.concurrency: must be written without an explicit YAML tag"},
-		{"explicit bool tag", "notifications:\n  enabled: !!bool true\n", "notifications.enabled: must be written without an explicit YAML tag"},
-		{"explicit str tag", "editor: !!str 12\n", "editor: must be written without an explicit YAML tag"},
-		{"custom tag", "editor: !custom vim\n", "editor: must be written without an explicit YAML tag"},
-		{"tagged null", "runs:\n  model: !!null x\n", "runs.model: must be written without an explicit YAML tag"},
-		{"tagged merge value", "runs:\n  <<: !!map {concurrency: 1}\n", "runs: must be merged without an explicit YAML tag"},
-		{"tagged key", "runs:\n  !!str concurrency: 1\n", "runs: keys must be written without an explicit YAML tag"},
-		{"float tag for integer", "runs:\n  concurrency: !!float 1\n", "runs.concurrency: must be written without an explicit YAML tag"},
+		{"float tag for integer", "runs:\n  concurrency: !!float 1\n", "runs.concurrency: must be an integer"},
+		{"str tag for integer", "runs:\n  concurrency: !!str 2\n", "runs.concurrency: must be an integer"},
+		{"int tag for string", "editor: !!int 12\n", "editor: must be a string"},
+		{"int tag on a non-integer", "runs:\n  concurrency: !!int '" + secret + "'\n", "runs.concurrency: must be an integer"},
+		{"bool tag on yes", "notifications:\n  enabled: !!bool yes\n", "notifications.enabled: must be a boolean"},
+		{"str tag for boolean", "notifications:\n  enabled: !!str true\n", "notifications.enabled: must be a boolean"},
+		{"binary tag for string", "editor: !!binary aGk=\n", "editor: must be a string"},
+		{"timestamp tag for string", "notifications:\n  sound: !!timestamp 2026-01-01\n", "notifications.sound: must be a string"},
+		{"custom tag", "editor: !custom vim\n", "editor: must be a string"},
+		{"null tag on a value", "runs:\n  model: !!null " + secret + "\n", "runs.model: must be a string"},
+		{"seq tag for mapping", "runs: !!seq []\n", "runs: must be a mapping"},
+		{"map tag for list", "runs:\n  args: !!map {}\n", "runs.args: must be a list"},
+		{"set tag for mapping", "runs: !!set {model: m}\n", "runs: must be a mapping"},
+		{"custom tag on mapping", "runs: !custom {model: m}\n", "runs: must be a mapping"},
+		{"custom tag on merge value", "runs:\n  <<: !custom {concurrency: 1}\n", "runs: must be merged from mappings only"},
+		{"custom tag on merged element", "runs:\n  <<: [!custom {concurrency: 1}]\n", "runs: must be merged from mappings only"},
+		{"int tag on key", "runs:\n  !!int concurrency: 1\n", "runs: keys must be strings"},
+		{"custom tag on key", "runs:\n  !custom concurrency: 1\n", "runs: keys must be strings"},
+		{"tagged wrong value behind merge tag", "runs:\n  !!merge <<: {concurrency: !!float 1}\n", "runs.concurrency: must be an integer"},
+		{"tagged wrong value in merge", "runs:\n  <<: !!map {concurrency: !!str 1}\n", "runs.concurrency: must be an integer"},
 		{"unquoted timestamp string", "notifications:\n  sound: 2026-01-01\n", "notifications.sound: must be a string"},
 		{"merged unknown key", "runs:\n  <<: {bogus: 1}\n", "bogus"},
 	}
@@ -310,6 +323,24 @@ func TestTypeChecksCoverYAMLIndirection(t *testing.T) {
 		})
 	}
 
+	t.Run("standard tags matching the schema are accepted", func(t *testing.T) {
+		content := "state_dir: !!str /s\n" +
+			"!!str editor: !!str vi\n" +
+			"sources: !!seq\n  - !!map {name: a, type: file, path: !<tag:yaml.org,2002:str> a.json}\n" +
+			"runs: !!map\n  !!str concurrency: !!int 2\n  args: !!seq [!!str --x, !!str 12]\n  model: !!null\n" +
+			"  !!merge <<: !!map {resume_args: [!!str r]}\n" +
+			"notifications:\n  enabled: !!bool 'false'\n  sound: !!str 2026-01-01\n" +
+			"prompts: {alert: ! p}\n"
+		cfg, report := load(t, content, nil)
+		if !report.OK() {
+			t.Fatalf("report = %+v", report)
+		}
+		if cfg.Editor != "vi" || cfg.Sources[0].Path == "" || cfg.Runs.Concurrency != 2 ||
+			!slices.Equal(cfg.Runs.Args, []string{"--x", "12"}) || !slices.Equal(cfg.Runs.ResumeArgs, []string{"r"}) ||
+			cfg.Notifications.Enabled || cfg.Notifications.Sound != "2026-01-01" {
+			t.Fatalf("cfg = %+v %+v %+v", cfg, cfg.Runs, cfg.Notifications)
+		}
+	})
 	t.Run("valid merges and aliases are accepted", func(t *testing.T) {
 		content := "state_dir: /s\n" +
 			"sources:\n" +
@@ -324,6 +355,65 @@ func TestTypeChecksCoverYAMLIndirection(t *testing.T) {
 		if len(cfg.Sources) != 2 || cfg.Sources[1].Name != "b" || cfg.Sources[1].Type != "file" ||
 			cfg.Runs.Concurrency != 3 || cfg.Runs.Args[0] != "--x" || cfg.Notifications.Sound != "gpt" {
 			t.Fatalf("cfg = %+v %+v %+v", cfg.Sources, cfg.Runs, cfg.Notifications)
+		}
+	})
+}
+
+// TestCyclicAliasesReturnErrors verifies that aliases referencing their own
+// ancestors produce value-free configuration errors instead of unbounded
+// recursion (review round 3, B9), and that repeated references are checked
+// in bounded time.
+func TestCyclicAliasesReturnErrors(t *testing.T) {
+	const secret = "31337.5"
+	for name, content := range map[string]string{
+		"direct merge":             "runs: &r\n  model: " + secret + "x\n  <<: *r\n",
+		"nested merge":             "runs: &r\n  <<: {<<: *r}\n",
+		"merge list":               "runs: &r\n  <<: [{model: m}, *r]\n",
+		"merge list element":       "runs: &r\n  <<: [{<<: *r}]\n",
+		"merged sequence itself":   "runs:\n  <<: &l [{<<: *l}]\n",
+		"through a nested mapping": "sources:\n  - &s {name: a, type: file, path: p, auth: {<<: *s}}\n",
+		"list containing itself":   "runs:\n  args: &a [*a]\n",
+		"top-level document":       "&d\n<<: *d\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !strings.HasPrefix(content, "sources:") && !strings.HasPrefix(content, "&d") {
+				content = "state_dir: /s\n" + minimalSources + content
+			}
+			_, _, err := Load(writeConfig(t, content), envMap(nil))
+			if err == nil {
+				t.Fatal("accepted a cyclic alias")
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("error discloses the configured value: %v", err)
+			}
+		})
+	}
+	t.Run("direct merge reports the cycle", func(t *testing.T) {
+		_, err := decodeRaw([]byte("runs: &r\n  <<: *r\n"))
+		if err == nil || !strings.Contains(err.Error(), "line 2: runs: must not contain itself (cyclic YAML alias)") {
+			t.Fatalf("err = %v", err)
+		}
+	})
+	t.Run("exponential alias fan-out is checked once per node", func(t *testing.T) {
+		var b strings.Builder
+		b.WriteString("x0: &x0 {concurrency: 1}\n")
+		for i := 1; i <= 12; i++ {
+			fmt.Fprintf(&b, "x%d: &x%d {<<: [", i, i)
+			for j := range 10 {
+				if j > 0 {
+					b.WriteString(", ")
+				}
+				fmt.Fprintf(&b, "*x%d", i-1)
+			}
+			b.WriteString("]}\n")
+		}
+		b.WriteString("runs:\n  <<: *x12\n")
+		start := time.Now()
+		if _, err := decodeRaw([]byte(b.String())); err == nil {
+			t.Fatal("accepted unknown keys")
+		}
+		if d := time.Since(start); d > 5*time.Second {
+			t.Fatalf("type check took %v", d)
 		}
 	})
 }

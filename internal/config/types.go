@@ -17,11 +17,16 @@ import (
 // Every way YAML can supply a value to the decoder is covered: aliases
 // (values and keys) are resolved to their anchors, and all values contributed
 // through merge keys ("<<") are checked as well as explicit keys, regardless
-// of which one the decoder would let win. Explicit tags ("!!int '7'",
-// "!!str 12", custom tags) are rejected, because they re-type values. A null
-// mapping value is treated like an omitted setting. Unknown keys, including
-// unknown keys in merged mappings, are left to the decoder's strict field
-// check. Messages identify the field and line, never the value.
+// of which one the decoder would let win. Explicit standard tags are allowed
+// when they match the expected type (e.g. "!!str vi", "!!int 2", "!!map");
+// mismatching standard tags ("!!float 1" for an integer, "!!binary" for a
+// string) and custom tags are rejected. A tagged scalar must also be a valid
+// plain representation of its tag, so the decoder never reports (and thereby
+// discloses) an unconvertible value. Cyclic aliases are reported instead of
+// being followed. A null mapping value is treated like an omitted setting.
+// Unknown keys, including unknown keys in merged mappings, are left to the
+// decoder's strict field check. Messages identify the field and line, never
+// the value.
 func checkTypes(doc *yaml.Node, t reflect.Type) error {
 	if doc == nil || doc.Kind == 0 {
 		return nil // empty file
@@ -33,13 +38,27 @@ func checkTypes(doc *yaml.Node, t reflect.Type) error {
 		}
 		n = n.Content[0]
 	}
-	var errs []error
-	n = resolve(n)
-	if isNull(n) && !tagged(n) {
-		return nil
+	c := &checker{active: map[*yaml.Node]bool{}, done: map[visit]bool{}}
+	if !omitted(n) {
+		c.node(n, t, "")
 	}
-	checkNode(n, t, "", &errs)
-	return errors.Join(errs...)
+	return errors.Join(c.errs...)
+}
+
+// visit identifies a composite node checked against a Go type for a field.
+// Each visit is performed once, which bounds the work for documents that
+// reference the same anchor many times (e.g. repeated merges), while an
+// anchor used for different fields is still reported for each of them.
+type visit struct {
+	n     *yaml.Node
+	t     reflect.Type
+	field string
+}
+
+type checker struct {
+	active map[*yaml.Node]bool // composite nodes on the current traversal path
+	done   map[visit]bool
+	errs   []error
 }
 
 // resolve follows aliases to the anchored node.
@@ -54,59 +73,164 @@ func tagged(n *yaml.Node) bool {
 	return n.Style&yaml.TaggedStyle != 0
 }
 
-func isNull(n *yaml.Node) bool {
-	return n.Kind == yaml.ScalarNode && n.ShortTag() == "!!null"
+// tagOf returns the effective YAML tag of the resolved node n, or "" if n has
+// a custom (non-standard) tag or is a tagged scalar whose text is not a valid
+// plain representation of its tag (e.g. "!!int 'x'", "!!bool yes"). Plain
+// scalars resolve implicitly; "!!str" accepts any text.
+func tagOf(n *yaml.Node) string {
+	tag := n.ShortTag()
+	if !strings.HasPrefix(tag, "!!") {
+		return ""
+	}
+	if n.Kind == yaml.ScalarNode && tagged(n) && tag != "!!str" {
+		plain := yaml.Node{Kind: yaml.ScalarNode, Value: n.Value}
+		if plain.ShortTag() != tag {
+			return ""
+		}
+	}
+	return tag
 }
 
+// omitted reports whether the value of a mapping entry is null, which is
+// treated like an omitted setting.
+func omitted(v *yaml.Node) bool {
+	v = resolve(v)
+	return v.Kind == yaml.ScalarNode && tagOf(v) == "!!null"
+}
+
+// isMergeKey mirrors the decoder's merge key detection.
 func isMergeKey(k *yaml.Node) bool {
-	return k.Kind == yaml.ScalarNode && k.ShortTag() == "!!merge"
+	return k.Kind == yaml.ScalarNode && k.Value == "<<" && (k.Tag == "" || k.Tag == "!" || k.ShortTag() == "!!merge")
 }
 
-func typeError(n *yaml.Node, field, want string) error {
+func orConfig(field string) string {
 	if field == "" {
-		field = "configuration"
+		return "configuration"
 	}
-	return fmt.Errorf("line %d: %s: must be %s", n.Line, field, want)
+	return field
 }
 
-func checkNode(n *yaml.Node, t reflect.Type, field string, errs *[]error) {
-	n = resolve(n)
-	if tagged(n) {
-		*errs = append(*errs, typeError(n, field, "written without an explicit YAML tag"))
-		return
+func (c *checker) fail(line int, field, msg string) {
+	c.errs = append(c.errs, fmt.Errorf("line %d: %s: %s", line, orConfig(field), msg))
+}
+
+// enter marks composite node n as being checked against t for field. It
+// reports false if n was already checked against t for field, or if n is on the current path, i.e.
+// the document references n from inside itself (line is the reference).
+func (c *checker) enter(n *yaml.Node, t reflect.Type, line int, field string) bool {
+	if c.active[n] {
+		c.fail(line, field, "must not contain itself (cyclic YAML alias)")
+		return false
 	}
+	if c.done[visit{n, t, field}] {
+		return false
+	}
+	c.done[visit{n, t, field}] = true
+	c.active[n] = true
+	return true
+}
+
+func (c *checker) leave(n *yaml.Node) { delete(c.active, n) }
+
+func (c *checker) node(orig *yaml.Node, t reflect.Type, field string) {
+	n := resolve(orig)
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+	tag := tagOf(n)
 	switch t.Kind() {
 	case reflect.String:
-		if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!str" {
-			*errs = append(*errs, typeError(n, field, "a string"))
+		if n.Kind != yaml.ScalarNode || tag != "!!str" {
+			c.fail(n.Line, field, "must be a string")
 		}
 	case reflect.Int:
-		if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!int" {
-			*errs = append(*errs, typeError(n, field, "an integer"))
+		if n.Kind != yaml.ScalarNode || tag != "!!int" {
+			c.fail(n.Line, field, "must be an integer")
 		}
 	case reflect.Bool:
-		if n.Kind != yaml.ScalarNode || n.ShortTag() != "!!bool" {
-			*errs = append(*errs, typeError(n, field, "a boolean (true or false)"))
+		if n.Kind != yaml.ScalarNode || tag != "!!bool" {
+			c.fail(n.Line, field, "must be a boolean (true or false)")
 		}
 	case reflect.Slice:
-		if n.Kind != yaml.SequenceNode {
-			*errs = append(*errs, typeError(n, field, "a list"))
+		if n.Kind != yaml.SequenceNode || tag != "!!seq" {
+			c.fail(n.Line, field, "must be a list")
 			return
 		}
-		for i, c := range n.Content {
-			checkNode(c, t.Elem(), fmt.Sprintf("%s[%d]", field, i), errs)
+		if !c.enter(n, t, orig.Line, field) {
+			return
+		}
+		defer c.leave(n)
+		for i, e := range n.Content {
+			c.node(e, t.Elem(), fmt.Sprintf("%s[%d]", field, i))
 		}
 	case reflect.Struct:
-		if n.Kind != yaml.MappingNode {
-			*errs = append(*errs, typeError(n, field, "a mapping"))
+		if n.Kind != yaml.MappingNode || tag != "!!map" {
+			c.fail(n.Line, field, "must be a mapping")
 			return
 		}
-		checkMapping(n, structFields(t), field, errs)
+		c.mapping(orig, t, field)
 	default:
-		*errs = append(*errs, typeError(n, field, "a supported value"))
+		c.fail(n.Line, field, "must be a supported value")
+	}
+}
+
+// mapping checks the key/value pairs of the mapping orig resolves to,
+// including all pairs merged into it through "<<", against struct type t.
+func (c *checker) mapping(orig *yaml.Node, t reflect.Type, field string) {
+	n := resolve(orig)
+	if !c.enter(n, t, orig.Line, field) {
+		return
+	}
+	defer c.leave(n)
+	fields := structFields(t)
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k, v := resolve(n.Content[i]), n.Content[i+1]
+		if isMergeKey(k) {
+			c.merge(v, t, field)
+			continue
+		}
+		if k.Kind != yaml.ScalarNode || tagOf(k) != "!!str" {
+			if tagged(k) {
+				c.fail(k.Line, field, "keys must be strings")
+			}
+			continue // other unknown keys are reported by the strict decoder
+		}
+		ft, ok := fields[k.Value]
+		if !ok {
+			continue
+		}
+		name := k.Value
+		if field != "" {
+			name = field + "." + k.Value
+		}
+		if omitted(v) {
+			continue
+		}
+		c.node(v, ft, name)
+	}
+}
+
+// merge checks the value of a merge key: a mapping or a list of mappings
+// (each possibly an alias).
+func (c *checker) merge(orig *yaml.Node, t reflect.Type, field string) {
+	v := resolve(orig)
+	switch {
+	case v.Kind == yaml.MappingNode && tagOf(v) == "!!map":
+		c.mapping(orig, t, field)
+	case v.Kind == yaml.SequenceNode && tagOf(v) == "!!seq":
+		if !c.enter(v, t, orig.Line, field) {
+			return
+		}
+		defer c.leave(v)
+		for _, e := range v.Content {
+			if r := resolve(e); r.Kind != yaml.MappingNode || tagOf(r) != "!!map" {
+				c.fail(r.Line, field, "must be merged from mappings only")
+				continue
+			}
+			c.mapping(e, t, field)
+		}
+	default:
+		c.fail(v.Line, field, "must be merged from mappings only")
 	}
 }
 
@@ -120,64 +244,4 @@ func structFields(t reflect.Type) map[string]reflect.Type {
 		}
 	}
 	return fields
-}
-
-// checkMapping checks the key/value pairs of mapping n, including all pairs
-// merged into it through "<<".
-func checkMapping(n *yaml.Node, fields map[string]reflect.Type, field string, errs *[]error) {
-	for i := 0; i+1 < len(n.Content); i += 2 {
-		k, v := resolve(n.Content[i]), n.Content[i+1]
-		if tagged(k) {
-			*errs = append(*errs, fmt.Errorf("line %d: %s: keys must be written without an explicit YAML tag", k.Line, orConfig(field)))
-			continue
-		}
-		if isMergeKey(k) {
-			checkMerge(v, fields, field, errs)
-			continue
-		}
-		ft, ok := fields[k.Value]
-		if !ok || k.Kind != yaml.ScalarNode {
-			continue // unknown keys are reported by the strict decoder
-		}
-		name := k.Value
-		if field != "" {
-			name = field + "." + k.Value
-		}
-		if rv := resolve(v); isNull(rv) && !tagged(rv) {
-			continue // null is treated as an omitted setting
-		}
-		checkNode(v, ft, name, errs)
-	}
-}
-
-// checkMerge checks the value of a merge key: a mapping or a list of
-// mappings (each possibly an alias).
-func checkMerge(v *yaml.Node, fields map[string]reflect.Type, field string, errs *[]error) {
-	v = resolve(v)
-	if tagged(v) {
-		*errs = append(*errs, typeError(v, field, "merged without an explicit YAML tag"))
-		return
-	}
-	switch v.Kind {
-	case yaml.MappingNode:
-		checkMapping(v, fields, field, errs)
-	case yaml.SequenceNode:
-		for _, e := range v.Content {
-			e = resolve(e)
-			if e.Kind != yaml.MappingNode || tagged(e) {
-				*errs = append(*errs, typeError(e, field, "merged from mappings only"))
-				continue
-			}
-			checkMapping(e, fields, field, errs)
-		}
-	default:
-		*errs = append(*errs, typeError(v, field, "merged from mappings only"))
-	}
-}
-
-func orConfig(field string) string {
-	if field == "" {
-		return "configuration"
-	}
-	return field
 }
