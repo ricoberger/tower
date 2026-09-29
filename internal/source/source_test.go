@@ -22,7 +22,8 @@ const sample = `[
   },
   {"fingerprint": "def", "status": {"state": "suppressed", "silencedBy": ["s1"]}},
   {"fingerprint": "ghi", "status": {"state": "unprocessed"}},
-  {"fingerprint": "jkl", "status": {"state": "active", "inhibitedBy": ["x"]}}
+  {"fingerprint": "jkl", "status": {"state": "active", "inhibitedBy": ["x"]}},
+  {"fingerprint": "mno", "status": {"state": "unprocessed", "silencedBy": ["s1"], "inhibitedBy": ["x"]}}
 ]`
 
 func TestDecodeSnapshot(t *testing.T) {
@@ -30,7 +31,7 @@ func TestDecodeSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 4 {
+	if len(alerts) != 5 {
 		t.Fatalf("len = %d", len(alerts))
 	}
 	a := alerts[0]
@@ -51,6 +52,9 @@ func TestDecodeSnapshot(t *testing.T) {
 	}
 	if !alerts[3].Suppressed() {
 		t.Error("inhibited alert must be suppressed even if state says active")
+	}
+	if !alerts[4].Unprocessed() || alerts[4].Active() || alerts[4].Suppressed() {
+		t.Error("unprocessed state must take precedence over silencedBy/inhibitedBy")
 	}
 	if alerts[1].Labels == nil || alerts[1].Annotations == nil {
 		t.Error("labels/annotations must be non-nil")
@@ -111,7 +115,7 @@ func TestFileFetchRereads(t *testing.T) {
 		t.Fatal(err)
 	}
 	alerts, err := src.Fetch(ctx)
-	if err != nil || len(alerts) != 4 {
+	if err != nil || len(alerts) != 5 {
 		t.Fatalf("fetch: %v %d", err, len(alerts))
 	}
 	if err := os.WriteFile(path, []byte("[]"), 0o600); err != nil {
