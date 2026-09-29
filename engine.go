@@ -300,15 +300,7 @@ func (e *engine) applyChange(ch reconcile.Change) error {
 		return e.store.Create(&it, ch.RawAlert)
 	}
 	if _, err := e.store.Update(ch.ItemID, func(disk *item.Item) error {
-		merged := ch.Item.Clone()
-		// Keep user actions/seen updates written concurrently by other
-		// processes: append only this pass's entries to the latest disk
-		// history.
-		merged.History = item.AppendHistory(disk.History, ch.Appended...)
-		if !ch.SeenChanged {
-			merged.Seen = disk.Seen
-		}
-		*disk = *merged
+		*disk = *mergeChange(disk, ch)
 		return nil
 	}); err != nil {
 		return err
@@ -324,6 +316,39 @@ func (e *engine) applyChange(ch reconcile.Change) error {
 		}
 	}
 	return nil
+}
+
+// mergeChange merges a reconciliation change into the latest on-disk item
+// read under the item lock. User actions and seen updates written
+// concurrently by other processes are kept: only this pass's history entries
+// are appended to the disk history. Timestamps never move backwards: an entry
+// computed before a concurrently persisted newer entry is recorded at that
+// newer time so the history stays chronological, and updated_at is never
+// older than the disk value or the last history entry.
+func mergeChange(disk *item.Item, ch reconcile.Change) *item.Item {
+	merged := ch.Item.Clone()
+	var last time.Time
+	if n := len(disk.History); n > 0 {
+		last = disk.History[n-1].At
+	}
+	appended := make([]item.HistoryEntry, 0, len(ch.Appended))
+	for _, h := range ch.Appended {
+		if h.At.Before(last) {
+			h.At = last
+		}
+		last = h.At
+		appended = append(appended, h)
+	}
+	merged.History = item.AppendHistory(disk.History, appended...)
+	if !ch.SeenChanged {
+		merged.Seen = disk.Seen
+	}
+	for _, t := range []time.Time{disk.UpdatedAt, last} {
+		if merged.UpdatedAt.Before(t) {
+			merged.UpdatedAt = t
+		}
+	}
+	return merged
 }
 
 // pruneOnce runs retention pruning once, using the already held engine lock.
