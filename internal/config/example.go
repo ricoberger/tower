@@ -33,10 +33,15 @@ sources:
     type: file                           # alertmanager | file
     path: ./testdata/alerts.json
 
-  # Grafana-managed Alertmanager (polling is added in a later version):
+  # Grafana-managed Alertmanager, polled at
+  # {url}/api/alertmanager/{grafana_alertmanager}/api/v2/alerts:
   # - name: prod
   #   type: alertmanager
-  #   # Name of the Grafana instance in $GRAFANA_INSTANCES.
+  #   # Name of the Grafana instance in $GRAFANA_INSTANCES (the JSON object the
+  #   # sre-grafana skill uses). It must exist when referenced. Its url and
+  #   # auth.tokenCommand (run with sh -c at request time, sent as a bearer
+  #   # token) are used for polling unless url / auth are set explicitly;
+  #   # "auth: {type: none}" disables the derived auth.
   #   grafana_instance: prod
   #   grafana_alertmanager: grafana
   #   # Alertmanager matchers pushed down to the API as filter= params.
@@ -45,7 +50,7 @@ sources:
   #   # Optional receiver regex pushed down as receiver= param.
   #   receiver: ".*"
 
-  # Plain Prometheus Alertmanager:
+  # Plain Prometheus Alertmanager, polled at {url}/api/v2/alerts:
   # - name: legacy-am
   #   type: alertmanager
   #   url: https://alertmanager.example.com
@@ -54,7 +59,11 @@ sources:
   #     # exactly one of token / token_file / token_command for bearer;
   #     # username + one of password / password_file / password_command for basic
   #     username: tower
+  #     # Files are read and commands run (sh -c) on every poll; their
+  #     # output is trimmed. Commands are never interpolated.
   #     password_file: $HOME/.config/tower/legacy-am.password
+  #   # Grafana instance for investigations (metadata only for plain sources;
+  #   # its credentials are never used for polling).
   #   # Optional but recommended: without it the skill has no Grafana to query.
   #   grafana_instance: prod
 

@@ -61,6 +61,9 @@ type Source struct {
 	Receiver string
 	// Auth is nil when omitted.
 	Auth *Auth
+	// Instance is the resolved $GRAFANA_INSTANCES record of
+	// GrafanaInstance, or nil when no (valid) instance is referenced.
+	Instance *GrafanaInstance
 }
 
 // Auth holds polling credentials. Credential variants are pointers so that the
@@ -280,6 +283,7 @@ func Load(path string, env LookupEnv) (*Config, Report, error) {
 
 	cfg := build(raw, abs, env, &report)
 	validate(cfg, &report)
+	resolveInstances(cfg, env, &report)
 	return cfg, report, nil
 }
 
