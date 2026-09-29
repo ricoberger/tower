@@ -622,7 +622,7 @@ type PruneCandidate struct {
 }
 
 // PruneCandidates lists valid done items with updated_at strictly before
-// cutoff. Unreadable items are never candidates.
+// cutoff. Items that LoadAll would skip as unreadable are never candidates.
 func (s *Store) PruneCandidates(cutoff time.Time) ([]PruneCandidate, error) {
 	ids, err := s.List()
 	if err != nil {
@@ -630,12 +630,14 @@ func (s *Store) PruneCandidates(cutoff time.Time) ([]PruneCandidate, error) {
 	}
 	var out []PruneCandidate
 	for _, id := range ids {
-		it, err := s.readItem(id)
+		// Use the loader's readability rules: an item skipped as unreadable
+		// (item.yaml, run metadata or alert.json) is never a candidate.
+		l, err := s.Load(id)
 		if err != nil {
 			continue
 		}
-		if eligible(it, cutoff) {
-			out = append(out, PruneCandidate{ID: id, Path: s.ItemDir(id), UpdatedAt: it.UpdatedAt})
+		if eligible(l.Item, cutoff) {
+			out = append(out, PruneCandidate{ID: id, Path: s.ItemDir(id), UpdatedAt: l.Item.UpdatedAt})
 		}
 	}
 	return out, nil
@@ -670,11 +672,13 @@ func (s *Store) PruneItem(id string, cutoff time.Time) (bool, error) {
 		return false, err
 	}
 	defer unlock()
-	it, err := s.readItem(id)
+	// Recheck against the current disk state with the same readability
+	// rules as LoadAll; an unreadable item is never deleted.
+	l, err := s.Load(id)
 	if err != nil {
 		return false, nil
 	}
-	if !eligible(it, cutoff) {
+	if !eligible(l.Item, cutoff) {
 		return false, nil
 	}
 	if err := s.ReserveCounter(key, n); err != nil {
