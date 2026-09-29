@@ -184,6 +184,14 @@ func Reconcile(in Input) Result {
 			a := cloneAlert(*is.Alert)
 			w.stored = &a
 		}
+		if w.it.Runs.OccurrenceBase == nil {
+			// Migrate a document written before runs.occurrence_base
+			// existed: derive the boundary from history/run evidence and
+			// persist it, without touching updated_at.
+			base := item.DeriveOccurrenceBase(w.it, w.runs)
+			w.it.Runs.OccurrenceBase = &base
+			w.dirty = true
+		}
 		p.works[w.it.ID] = w
 		if _, n, err := item.ParseID(w.it.ID); err == nil {
 			k := w.it.Key()
@@ -249,10 +257,11 @@ func (p *pass) touch(w *work) {
 
 func (p *pass) transition(w *work, to item.State, reason string) {
 	e := item.HistoryEntry{At: p.now, From: w.it.State, To: to, Reason: reason}
-	if to == item.StateNew && (w.it.State == "" || w.it.State == item.StateResolved || w.it.State == item.StateDone) {
+	if item.OccurrenceStarts(w.it.State, to) {
 		// A new occurrence starts (T1, T9 into new, T10): only runs created
 		// from now on count as its preparation.
-		w.it.Runs.OccurrenceBase = w.it.Runs.Current
+		base := w.it.Runs.Current
+		w.it.Runs.OccurrenceBase = &base
 	}
 	w.it.State = to
 	w.it.History = item.AppendHistory(w.it.History, e)
@@ -277,7 +286,7 @@ func (p *pass) ignore(ev Event, reason string) {
 // boundary is the durable runs.occurrence_base, not the bounded history, so
 // history eviction cannot change it.
 func inOccurrence(it *item.Item, r item.Run) bool {
-	return r.Number > it.Runs.OccurrenceBase
+	return it.Runs.OccurrenceBase == nil || r.Number > *it.Runs.OccurrenceBase
 }
 
 func (w *work) executing() (int, bool) {
@@ -468,6 +477,7 @@ func (p *pass) create(k item.Key, a source.Alert, observedAt time.Time, previous
 		CreatedAt:    p.now,
 		Source:       item.SourceRef{Name: k.Source, Fingerprint: k.Fingerprint},
 		Alert:        item.AlertInfo{Occurrences: 1},
+		Runs:         item.RunsInfo{OccurrenceBase: new(int)},
 		PreviousItem: previous,
 	}
 	w := &work{it: it, create: true}

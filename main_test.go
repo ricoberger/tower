@@ -512,6 +512,15 @@ func TestEngineIntegration(t *testing.T) {
 	if readItem(t, stateDir, recentDone) == nil {
 		t.Fatal("recent done item pruned")
 	}
+	// The seeded item predates runs.occurrence_base (written as null): the
+	// engine migrates and persists it without touching updated_at.
+	eventually(t, "occurrence_base migration", func() bool {
+		it := readItem(t, stateDir, recentDone)
+		return it != nil && it.Runs.OccurrenceBase != nil
+	})
+	if it := readItem(t, stateDir, recentDone); *it.Runs.OccurrenceBase != 0 || !it.UpdatedAt.Before(time.Now().Add(-30*time.Minute)) {
+		t.Fatalf("migrated item = %+v", it.Runs)
+	}
 
 	// Source failure is nonfatal and visible.
 	writeFixture(t, fixture, "not json")

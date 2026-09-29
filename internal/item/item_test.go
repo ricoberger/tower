@@ -58,7 +58,7 @@ func TestItemRoundTrip(t *testing.T) {
 		StartsAt: t0, LastSeenAt: t0.Add(time.Minute), ResolvedAt: ptr(t0.Add(time.Hour)), Status: AlertResolved,
 		Occurrences: 3, Labels: map[string]string{"a": "b"}, GeneratorURL: "g", RunbookURL: "r",
 	}
-	full.Runs = RunsInfo{Current: 2, PendingReason: ptr(ReasonRetry), OccurrenceBase: 1}
+	full.Runs = RunsInfo{Current: 2, PendingReason: ptr(ReasonRetry), OccurrenceBase: ptr(1)}
 	full.PreviousItem = ptr("alert-my-src-F00-11")
 	full.History = append(full.History,
 		HistoryEntry{At: t0, Action: ActionOpenedReport, Run: 2},
@@ -131,8 +131,8 @@ func TestItemValidate(t *testing.T) {
 		"status":         func(it *Item) { it.Alert.Status = "firing" },
 		"current":        func(it *Item) { it.Runs.Current = -1 },
 		"pending reason": func(it *Item) { it.Runs.PendingReason = ptr(RunReason("x")) },
-		"base negative":  func(it *Item) { it.Runs.OccurrenceBase = -1 },
-		"base > current": func(it *Item) { it.Runs.Current, it.Runs.OccurrenceBase = 1, 2 },
+		"base negative":  func(it *Item) { it.Runs.OccurrenceBase = ptr(-1) },
+		"base > current": func(it *Item) { it.Runs.Current, it.Runs.OccurrenceBase = 1, ptr(2) },
 		"previous":       func(it *Item) { it.PreviousItem = ptr("../../etc") },
 	}
 	for name, mutate := range cases {
@@ -141,6 +141,86 @@ func TestItemValidate(t *testing.T) {
 		if err := it.Validate("alert-dev-abc-1"); err == nil {
 			t.Errorf("%s: want error", name)
 		}
+	}
+}
+
+func TestLegacyItemWithoutOccurrenceBase(t *testing.T) {
+	it := newItem(t, key, 1)
+	it.Runs.OccurrenceBase = ptr(0)
+	data, err := yaml.Marshal(it)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "occurrence_base: 0") {
+		t.Fatalf("explicit 0 not written:\n%s", data)
+	}
+	got, err := decodeItem(it.ID, data)
+	if err != nil || got.Runs.OccurrenceBase == nil || *got.Runs.OccurrenceBase != 0 {
+		t.Fatalf("explicit 0 decoded as %v (%v)", got.Runs.OccurrenceBase, err)
+	}
+	for name, doc := range map[string]string{
+		"absent": strings.Replace(string(data), "    occurrence_base: 0\n", "", 1),
+		"null":   strings.Replace(string(data), "occurrence_base: 0", "occurrence_base: null", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if doc == string(data) {
+				t.Fatal("fixture unchanged")
+			}
+			got, err := decodeItem(it.ID, []byte(doc))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Runs.OccurrenceBase != nil {
+				t.Fatalf("occurrence_base = %d, want unset", *got.Runs.OccurrenceBase)
+			}
+			if c := got.Clone(); c.Runs.OccurrenceBase != nil {
+				t.Fatal("clone invented occurrence_base")
+			}
+		})
+	}
+	c := got.Clone()
+	*c.Runs.OccurrenceBase = 5
+	if *got.Runs.OccurrenceBase != 0 {
+		t.Fatal("clone shares occurrence_base")
+	}
+}
+
+func TestDeriveOccurrenceBase(t *testing.T) {
+	at := func(m int) time.Time { return t0.Add(time.Duration(m) * time.Minute) }
+	tr := func(m int, from, to State) HistoryEntry {
+		return HistoryEntry{At: at(m), From: from, To: to, Reason: "r"}
+	}
+	runs := []Run{{Number: 1, QueuedAt: at(1)}, {Number: 2, QueuedAt: at(10)}, {Number: 3, QueuedAt: at(30)}}
+	cases := []struct {
+		name    string
+		history []HistoryEntry
+		runs    []Run
+		current int
+		want    int
+	}{
+		{"created only", []HistoryEntry{tr(0, "", StateNew)}, runs, 3, 0},
+		{"T10 reopen", []HistoryEntry{tr(0, "", StateNew), tr(5, StateResolved, StateDone), tr(20, StateDone, StateNew)}, runs, 3, 2},
+		{"latest T9 wins", []HistoryEntry{tr(0, "", StateNew), tr(5, StateResolved, StateNew), tr(25, StateResolved, StateNew)}, runs, 3, 2},
+		{"T9 restoring needs-you is no start", []HistoryEntry{tr(0, "", StateNew), tr(20, StateResolved, StateNeedsYou)}, runs, 3, 0},
+		{"T6 into new is no start", []HistoryEntry{tr(0, "", StateNew), tr(20, StateSnoozed, StateNew)}, runs, 3, 0},
+		{"actions ignored", []HistoryEntry{tr(0, "", StateNew), tr(5, StateDone, StateNew), {At: at(40), Action: ActionDismissed}}, runs, 3, 1},
+		{"start evicted", []HistoryEntry{tr(20, StateNew, StateQueued)}, runs, 3, 0},
+		{"capped at current", []HistoryEntry{tr(50, StateDone, StateNew)}, runs, 2, 2},
+		{"no runs", []HistoryEntry{tr(50, StateDone, StateNew)}, nil, 2, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			it := newItem(t, key, 1)
+			it.History, it.Runs.Current = c.history, c.current
+			if got := DeriveOccurrenceBase(it, c.runs); got != c.want {
+				t.Fatalf("base = %d, want %d", got, c.want)
+			}
+		})
+	}
+	it := newItem(t, key, 1)
+	it.Runs.Current, it.Runs.OccurrenceBase = 3, ptr(3)
+	if got := DeriveOccurrenceBase(it, runs); got != 3 {
+		t.Fatalf("recorded base overridden: %d", got)
 	}
 }
 

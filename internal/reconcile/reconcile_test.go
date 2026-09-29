@@ -5,8 +5,11 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/ricoberger/tower/internal/item"
 	"github.com/ricoberger/tower/internal/source"
@@ -864,8 +867,8 @@ func TestOccurrenceSurvivesHistoryEviction(t *testing.T) {
 		a := alert(t, "dev", "fp1", "active", now, nil) // young: T2 not yet due
 		s.step(now, []Snapshot{snap("dev", now, a)})
 		wantState(t, s.get(id1), item.StateNew)
-		if s.get(id1).Runs.OccurrenceBase != 1 {
-			t.Fatalf("occurrence_base = %d, want 1", s.get(id1).Runs.OccurrenceBase)
+		if b := s.get(id1).Runs.OccurrenceBase; b == nil || *b != 1 {
+			t.Fatalf("occurrence_base = %v, want 1", b)
 		}
 		fillHistory(t, s, id1, now)
 		return s, a, now
@@ -901,6 +904,148 @@ func TestOccurrenceSurvivesHistoryEviction(t *testing.T) {
 		if len(effects(res, EffectEnqueue)) != 0 {
 			t.Fatal("duplicate preparation after history eviction")
 		}
+	})
+}
+
+// legacy rewrites an item into the version-1 document written before
+// runs.occurrence_base existed: serialize it, drop the field and decode the
+// document again, as loading such a file from disk does.
+func legacy(t *testing.T, s *sim, id string) {
+	t.Helper()
+	raw, err := yaml.Marshal(s.get(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, l := range strings.Split(string(raw), "\n") {
+		if !strings.Contains(l, "occurrence_base:") {
+			lines = append(lines, l)
+		}
+	}
+	var it item.Item
+	if err := yaml.Unmarshal([]byte(strings.Join(lines, "\n")), &it); err != nil {
+		t.Fatal(err)
+	}
+	if err := it.Validate(id); err != nil {
+		t.Fatal(err)
+	}
+	if it.Runs.OccurrenceBase != nil {
+		t.Fatal("legacy document still records occurrence_base")
+	}
+	s.items[id].Item = it
+}
+
+func TestLegacyItemWithoutOccurrenceBase(t *testing.T) {
+	wantBase := func(t *testing.T, it *item.Item, want int) {
+		t.Helper()
+		if b := it.Runs.OccurrenceBase; b == nil || *b != want {
+			t.Fatalf("occurrence_base = %v, want %d", b, want)
+		}
+	}
+	t.Run("T10-reopened item is prepared for the new occurrence", func(t *testing.T) {
+		s, _, resolvedAt := doneAfterResolution(t)
+		now := resolvedAt.Add(5 * time.Hour)
+		a := alert(t, "dev", "fp1", "active", now, nil)
+		s.step(now, []Snapshot{snap("dev", now, a)})
+		wantState(t, s.get(id1), item.StateNew)
+		legacy(t, s, id1)
+		updated := s.get(id1).UpdatedAt
+		// The first reconcile migrates the field without a transition or a
+		// changed updated_at; the persisted value is then stable.
+		res := s.step(now, []Snapshot{snap("dev", now, a)})
+		if len(res.Changes) != 1 || len(transitions(res, id1)) != 0 || len(res.Effects) != 0 {
+			t.Fatalf("migration: changes=%+v effects=%+v", res.Changes, res.Effects)
+		}
+		wantBase(t, s.get(id1), 1)
+		if !s.get(id1).UpdatedAt.Equal(updated) {
+			t.Fatalf("migration changed updated_at: %v -> %v", updated, s.get(id1).UpdatedAt)
+		}
+		s.assertStable(now, snap("dev", now, a))
+		res = s.step(now.Add(cfg.PrepareAfter), []Snapshot{snap("dev", now, a)})
+		wantState(t, s.get(id1), item.StateQueued)
+		if enq := effects(res, EffectEnqueue); len(enq) != 1 || enq[0].Run != 2 {
+			t.Fatalf("effects = %+v", res.Effects)
+		}
+	})
+	t.Run("T10-reopened item migrated in the same step as T2", func(t *testing.T) {
+		s, _, resolvedAt := doneAfterResolution(t)
+		now := resolvedAt.Add(5 * time.Hour)
+		a := alert(t, "dev", "fp1", "active", now, nil)
+		s.step(now, []Snapshot{snap("dev", now, a)})
+		legacy(t, s, id1)
+		res := s.step(now.Add(cfg.PrepareAfter), []Snapshot{snap("dev", now, a)})
+		wantState(t, s.get(id1), item.StateQueued)
+		wantBase(t, s.get(id1), 1)
+		if len(effects(res, EffectEnqueue)) != 1 {
+			t.Fatalf("effects = %+v", res.Effects)
+		}
+	})
+	t.Run("T9-reopened item of a later occurrence", func(t *testing.T) {
+		// done -> T10 new (base 1) -> resolved -> T9 new, all before the
+		// second occurrence was prepared; run 1 belongs to the first one.
+		s, _, resolvedAt := doneAfterResolution(t)
+		now := resolvedAt.Add(5 * time.Hour)
+		a := alert(t, "dev", "fp1", "active", now, nil)
+		s.step(now, []Snapshot{snap("dev", now, a)})
+		s.step(now.Add(time.Minute), []Snapshot{snap("dev", now.Add(time.Minute))})
+		wantState(t, s.get(id1), item.StateResolved)
+		s.step(now.Add(2*time.Minute), []Snapshot{snap("dev", now.Add(2*time.Minute), a)})
+		wantState(t, s.get(id1), item.StateNew)
+		legacy(t, s, id1)
+		later := now.Add(2*time.Minute + cfg.PrepareAfter)
+		res := s.step(later, []Snapshot{snap("dev", later, a)})
+		wantState(t, s.get(id1), item.StateQueued)
+		wantBase(t, s.get(id1), 1)
+		if enq := effects(res, EffectEnqueue); len(enq) != 1 || enq[0].Run != 2 {
+			t.Fatalf("effects = %+v", res.Effects)
+		}
+	})
+	t.Run("single occurrence stays prepared", func(t *testing.T) {
+		s, a := needsYouItem(t)
+		legacy(t, s, id1)
+		sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
+		s.step(t0.Add(2*time.Minute), []Snapshot{snap("dev", t0.Add(2*time.Minute), sup)})
+		wantState(t, s.get(id1), item.StateSnoozed)
+		wantBase(t, s.get(id1), 0)
+		res := s.step(t0.Add(3*time.Minute), []Snapshot{snap("dev", t0.Add(3*time.Minute), a)})
+		wantState(t, s.get(id1), item.StateNeedsYou)
+		if len(effects(res, EffectEnqueue)) != 0 {
+			t.Fatal("duplicate preparation for a legacy item")
+		}
+	})
+	t.Run("new item without runs", func(t *testing.T) {
+		s, a := newYoung(t)
+		legacy(t, s, id1)
+		res := s.step(t0.Add(cfg.PrepareAfter), []Snapshot{snap("dev", t0.Add(cfg.PrepareAfter), a)})
+		wantState(t, s.get(id1), item.StateQueued)
+		wantBase(t, s.get(id1), 0)
+		if enq := effects(res, EffectEnqueue); len(enq) != 1 || enq[0].Run != 1 {
+			t.Fatalf("effects = %+v", res.Effects)
+		}
+	})
+	t.Run("evicted occurrence start falls back to no duplicate run", func(t *testing.T) {
+		s, a := needsYouItem(t)
+		fillHistory(t, s, id1, t0.Add(time.Minute))
+		legacy(t, s, id1)
+		sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
+		s.step(t0.Add(2*time.Minute), []Snapshot{snap("dev", t0.Add(2*time.Minute), sup)})
+		wantBase(t, s.get(id1), 0)
+		res := s.step(t0.Add(3*time.Minute), []Snapshot{snap("dev", t0.Add(3*time.Minute), a)})
+		wantState(t, s.get(id1), item.StateNeedsYou)
+		if len(effects(res, EffectEnqueue)) != 0 {
+			t.Fatal("duplicate preparation after eviction")
+		}
+	})
+	t.Run("terminal items are migrated once", func(t *testing.T) {
+		s, _, resolvedAt := doneAfterResolution(t)
+		legacy(t, s, id1)
+		now := resolvedAt.Add(cfg.ResolvedLinger + time.Hour)
+		res := s.step(now, []Snapshot{snap("dev", now)})
+		if len(res.Changes) != 1 || len(transitions(res, id1)) != 0 {
+			t.Fatalf("changes = %+v", res.Changes)
+		}
+		wantBase(t, s.get(id1), 0)
+		s.assertStable(now.Add(time.Second), snap("dev", now.Add(time.Second)))
 	})
 }
 

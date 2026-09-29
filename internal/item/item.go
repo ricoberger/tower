@@ -168,9 +168,13 @@ type RunsInfo struct {
 	// occurrence started (creation, or a reopen into new by T9/T10). Runs
 	// numbered above it belong to the current occurrence. It is kept
 	// separately from the bounded history so that evicting old history
-	// entries never changes occurrence identity. Internal bookkeeping; 0
-	// means every run belongs to the current occurrence.
-	OccurrenceBase int `yaml:"occurrence_base"`
+	// entries never changes occurrence identity. Internal bookkeeping.
+	//
+	// nil means the field is absent (or null), as in version-1 documents
+	// written before it existed; DeriveOccurrenceBase then reconstructs it
+	// from history and run evidence. An explicit 0 means every run belongs
+	// to the current occurrence.
+	OccurrenceBase *int `yaml:"occurrence_base"`
 }
 
 // HistoryEntry is either a state transition (From, To, Reason) or a user
@@ -286,6 +290,10 @@ func (it *Item) Clone() *Item {
 		r := *it.Runs.PendingReason
 		c.Runs.PendingReason = &r
 	}
+	if it.Runs.OccurrenceBase != nil {
+		b := *it.Runs.OccurrenceBase
+		c.Runs.OccurrenceBase = &b
+	}
 	if it.PreviousItem != nil {
 		p := *it.PreviousItem
 		c.PreviousItem = &p
@@ -349,7 +357,7 @@ func (it *Item) Validate(id string) error {
 	if it.Runs.Current < 0 {
 		return errors.New("negative runs.current")
 	}
-	if it.Runs.OccurrenceBase < 0 || it.Runs.OccurrenceBase > it.Runs.Current {
+	if b := it.Runs.OccurrenceBase; b != nil && (*b < 0 || *b > it.Runs.Current) {
 		return errors.New("runs.occurrence_base out of range")
 	}
 	if it.Runs.PendingReason != nil && !it.Runs.PendingReason.Valid() {
@@ -361,6 +369,39 @@ func (it *Item) Validate(id string) error {
 		}
 	}
 	return nil
+}
+
+// OccurrenceStarts reports whether a transition from -> to starts a new
+// alert occurrence: creation into new, T9 reopening into new, or T10.
+func OccurrenceStarts(from, to State) bool {
+	return to == StateNew && (from == "" || from == StateResolved || from == StateDone)
+}
+
+// DeriveOccurrenceBase reconstructs runs.occurrence_base for an item whose
+// document does not record it (written before the field existed). The
+// boundary is the latest occurrence-starting transition in the history: runs
+// queued before it belong to earlier occurrences. If that transition is no
+// longer in the (bounded) history, the evidence is inconclusive and every run
+// is attributed to the current occurrence (0), which never causes a
+// duplicate automatic preparation. A recorded value is returned unchanged.
+func DeriveOccurrenceBase(it *Item, runs []Run) int {
+	if it.Runs.OccurrenceBase != nil {
+		return *it.Runs.OccurrenceBase
+	}
+	for i := len(it.History) - 1; i >= 0; i-- {
+		h := it.History[i]
+		if h.IsAction() || !OccurrenceStarts(h.From, h.To) {
+			continue
+		}
+		base := 0
+		for _, r := range runs {
+			if r.QueuedAt.Before(h.At) {
+				base = max(base, r.Number)
+			}
+		}
+		return min(base, it.Runs.Current)
+	}
+	return 0
 }
 
 // Run is the content of runs/<n>/meta.yaml.
