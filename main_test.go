@@ -209,6 +209,22 @@ func TestUsageErrors(t *testing.T) {
 	}
 }
 
+func TestHelp(t *testing.T) {
+	e := testEnv(t.TempDir(), nil, time.Now())
+	code, _, stderr := runCLI(t, e, "--help")
+	if code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{"start the terminal UI", "resume <item-id> [--placement split|tab|window]", "config validate", "prune", "version"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("help misses %q:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "headless") {
+		t.Errorf("help advertises the headless flag:\n%s", stderr)
+	}
+}
+
 func TestLogLevel(t *testing.T) {
 	dir, cfgPath, _, _ := setup(t, "")
 	e := testEnv(dir, map[string]string{"TOWER_TEST_TOKEN": credentialSentinel}, time.Now())
