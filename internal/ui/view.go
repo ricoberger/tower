@@ -97,7 +97,7 @@ func (m *Model) footerText() string {
 		}
 	}
 	if m.help {
-		return Dim("? / esc close help · q quit")
+		return Dim("j/k ↓/↑ g/G scroll help · ? / esc close help · q quit")
 	}
 	if m.footer != "" {
 		if m.footerErr {
@@ -238,8 +238,11 @@ func (m *Model) previewContent(width, height int) string {
 	for _, l := range logical {
 		lines = append(lines, strings.Split(ansi.Wrap(l, width, ""), "\n")...)
 	}
-	scroll := 0
-	if !m.help {
+	var scroll int
+	if m.help {
+		m.helpScroll = min(m.helpScroll, max(len(lines)-height, 0))
+		scroll = m.helpScroll
+	} else {
 		m.scroll = min(m.scroll, max(len(lines)-height, 0))
 		scroll = m.scroll
 	}
@@ -433,7 +436,7 @@ func helpLines() []string {
 	return []string{
 		section("Navigation"),
 		"j / k, ↓ / ↑   move the selection (scroll when the preview is focused)",
-		"g / G         first / last item (top / bottom of the preview)",
+		"g / G         first / last item",
 		"tab           switch focus between list and preview",
 		"",
 		section("Item actions"),
@@ -456,5 +459,8 @@ func helpLines() []string {
 		"Dismissing and resuming a still executing run ask in the footer.",
 		"Only y confirms; n or esc cancels. Other keys are ignored while a",
 		"confirmation or this help is open.",
+		"",
+		section("This help"),
+		"j / k, ↓ / ↑, g / G scroll this help; ? or esc closes it.",
 	}
 }

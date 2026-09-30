@@ -9,12 +9,17 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ricoberger/tower/internal/item"
 )
+
+// EditorStopDelay is how long a terminated editor may take to exit on
+// shutdown before it is killed.
+const EditorStopDelay = 5 * time.Second
 
 // DoneWindow is how recently a done item must have been updated to be shown
 // in the Done group.
@@ -73,6 +78,8 @@ type Options struct {
 	// Heartbeat is the display refresh interval (0: one second, negative:
 	// disabled, for tests that send HeartbeatMsg themselves).
 	Heartbeat time.Duration
+	// EditorStopDelay overrides EditorStopDelay (tests).
+	EditorStopDelay time.Duration
 }
 
 type focusArea int
@@ -161,6 +168,8 @@ type Model struct {
 	footerErr bool
 
 	scroll int
+	// helpScroll is the scroll offset of the help overlay.
+	helpScroll int
 	// art are the loaded artifacts of the selected finished run;
 	// artLoading is the key of the load in flight.
 	art        artifacts
@@ -178,6 +187,9 @@ func New(ctx context.Context, opts Options) *Model {
 	}
 	if opts.Heartbeat == 0 {
 		opts.Heartbeat = time.Second
+	}
+	if opts.EditorStopDelay <= 0 {
+		opts.EditorStopDelay = EditorStopDelay
 	}
 	m := &Model{ctx: ctx, opts: opts, now: opts.Now()}
 	if s, ok := opts.Feed.Latest(); ok {
@@ -434,6 +446,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.help = false
 		case "q":
 			return m, tea.Quit
+		case "j", "down":
+			m.helpScroll++
+		case "k", "up":
+			m.helpScroll = max(m.helpScroll-1, 0)
+		case "g":
+			m.helpScroll = 0
+		case "G":
+			m.helpScroll = 1 << 30 // clamped when rendered
 		}
 		return m, nil
 	}
@@ -442,6 +462,7 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "?":
 		m.help = true
+		m.helpScroll = 0
 		return m, nil
 	case "esc":
 		m.setHint("", false)
@@ -476,14 +497,10 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		case "k", "up":
 			m.scroll = max(m.scroll-1, 0)
 			return m, nil
-		case "g":
-			m.scroll = 0
-			return m, nil
-		case "G":
-			m.scroll = 1 << 30 // clamped when rendered
-			return m, nil
 		}
-	} else if m.list.Handle(k, len(m.visible)) {
+	}
+	// g and G select the first and last item regardless of focus.
+	if m.list.Handle(k, len(m.visible)) {
 		prev := m.selected
 		m.syncSelected()
 		if m.selected != prev {
@@ -633,11 +650,15 @@ func (m *Model) launchResume(id string, run int, session, placement string) tea.
 }
 
 // editorCmd returns the editor invocation with each path as its own
-// argument.
+// argument. The editor runs interactively in the terminal for as long as the
+// user needs; only shutdown (the model's context ending) stops it: it gets
+// SIGTERM first and is killed if it has not exited after the stop delay. It
+// stays in tower's process group, so terminal job control is unchanged.
 func (m *Model) editorCmd(paths ...string) *exec.Cmd {
-	// The editor runs interactively in the terminal (tea.ExecProcess), so
-	// it is not bound to a context; paths are separate arguments.
-	return exec.Command(m.opts.Editor, paths...) //nolint:noctx,gosec // configured editor executable; paths are arguments
+	cmd := exec.CommandContext(m.ctx, m.opts.Editor, paths...) //nolint:gosec // configured editor executable; paths are arguments
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.WaitDelay = m.opts.EditorStopDelay
+	return cmd
 }
 
 func (m *Model) openReport(id string, run int) tea.Cmd {

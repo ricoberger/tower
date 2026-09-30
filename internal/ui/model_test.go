@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -95,7 +96,12 @@ func (d *driver) run(cmd tea.Cmd) {
 		d.execs = append(d.execs, msg.Cmd.Args)
 		err := d.execErr
 		if d.runExec {
-			err = msg.Cmd.Run()
+			// The fixture's model context is already cancelled (see
+			// newFixture), so a copy without it stands in for the
+			// terminal handoff.
+			c := exec.CommandContext(d.t.Context(), msg.Cmd.Path, msg.Cmd.Args[1:]...) // #nosec G204 -- copy of the model's own command
+			c.Env, c.Dir = msg.Cmd.Env, msg.Cmd.Dir
+			err = c.Run()
 		}
 		d.send(msg.After(err))
 	default:
@@ -438,12 +444,21 @@ func TestNavigationFocusAndSizes(t *testing.T) {
 	if f.d.m.SelectedID() != ids[2].Item.ID || f.d.m.scroll != 3 {
 		t.Fatalf("preview scroll: sel=%s scroll=%d", f.d.m.SelectedID(), f.d.m.scroll)
 	}
-	f.d.keys("k", "g")
-	if f.d.m.scroll != 0 {
+	f.d.keys("k")
+	if f.d.m.scroll != 2 {
+		t.Fatal("k in preview")
+	}
+	// g and G select the first and last item regardless of focus.
+	f.d.keys("G")
+	if f.d.m.SelectedID() != ids[4].Item.ID || f.d.m.scroll != 0 || f.d.m.focus != focusPreview {
+		t.Fatalf("G in preview: sel=%s scroll=%d", f.d.m.SelectedID(), f.d.m.scroll)
+	}
+	f.d.keys("g")
+	if f.d.m.SelectedID() != ids[0].Item.ID {
 		t.Fatal("g in preview")
 	}
 	f.d.keys("tab", "j")
-	if f.d.m.SelectedID() != ids[3].Item.ID {
+	if f.d.m.SelectedID() != ids[1].Item.ID {
 		t.Fatal("tab back to list")
 	}
 	for _, size := range [][2]int{{0, 0}, {1, 1}, {5, 3}, {10, 5}, {20, 6}, {30, 10}, {80, 24}, {200, 60}} {
@@ -484,6 +499,39 @@ func TestHelpAndConfirmationCaptureKeys(t *testing.T) {
 	if f.d.m.help {
 		t.Fatal("esc did not close help")
 	}
+
+	// At an ordinary terminal size every help line is reachable by
+	// scrolling, and scrolling moves neither the selection nor the preview.
+	f.d.send(tea.WindowSizeMsg{Width: 80, Height: 24})
+	f.d.keys("?")
+	seen := ""
+	for range 40 {
+		seen += ansi.Strip(f.view())
+		f.d.keys("j")
+	}
+	for _, l := range helpLines() {
+		for _, word := range strings.Fields(ansi.Strip(l)) {
+			if !strings.Contains(seen, word) {
+				t.Fatalf("help word %q never visible at 80x24", word)
+			}
+		}
+	}
+	if !strings.Contains(ansi.Strip(f.view()), "closes it.") {
+		t.Fatal("the end of the help is not reachable")
+	}
+	f.d.keys("g")
+	if !strings.Contains(ansi.Strip(f.view()), "Navigation") || f.d.m.SelectedID() != a || f.d.m.scroll != 0 {
+		t.Fatal("g in help")
+	}
+	f.d.keys("G", "?")
+	if f.d.m.help || f.d.m.SelectedID() != a {
+		t.Fatal("G in help moved the selection")
+	}
+	f.d.keys("?")
+	if !strings.Contains(ansi.Strip(f.view()), "Navigation") {
+		t.Fatal("reopened help does not start at the top")
+	}
+	f.d.keys("?")
 
 	// A dismissal waits for y and ignores other keys.
 	f.d.keys("x")
@@ -726,15 +774,16 @@ func TestPreparedPreview(t *testing.T) {
 	if strings.Contains(f.view(), "END OF REPORT") {
 		t.Fatal("report end visible without scrolling")
 	}
-	f.d.keys("tab", "G")
-	if !strings.Contains(f.view(), "END OF REPORT") {
-		t.Fatal("G did not scroll to the end")
+	f.d.keys("tab")
+	f.d.keys(slices.Repeat([]string{"j"}, 200)...)
+	if !strings.Contains(f.view(), "END OF REPORT") || f.d.m.SelectedID() != a {
+		t.Fatal("j did not scroll to the end")
 	}
 	// Resizing recomputes wrapping and the scroll bounds.
 	f.d.send(tea.WindowSizeMsg{Width: 60, Height: 20})
-	f.d.keys("G")
+	f.d.keys(slices.Repeat([]string{"j"}, 200)...)
 	if !strings.Contains(f.view(), "END OF REPORT") {
-		t.Fatal("G after a resize")
+		t.Fatal("scrolling after a resize")
 	}
 	f.d.send(tea.WindowSizeMsg{Width: 200, Height: 60})
 	if v := f.view(); !strings.Contains(v, "END OF REPORT") || !strings.Contains(v, "line of the report") {
