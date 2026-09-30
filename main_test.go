@@ -18,21 +18,50 @@ import (
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/ricoberger/tower/internal/config"
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/loginenv"
 	"github.com/ricoberger/tower/internal/reconcile"
 
 	"gopkg.in/yaml.v3"
 )
 
-// TestMain lets subprocess tests re-execute the test binary as tower.
+// TestMain lets subprocess tests re-execute the test binary as tower. The
+// arguments come from TOWER_TEST_ARGS or, when it is unset, from the command
+// line itself (as a notification click would pass them).
 func TestMain(m *testing.M) {
 	if os.Getenv("TOWER_TEST_RUN_MAIN") == "1" {
-		os.Args = append([]string{"tower"}, strings.Fields(os.Getenv("TOWER_TEST_ARGS"))...)
-		main()
-		return
+		if args, ok := os.LookupEnv("TOWER_TEST_ARGS"); ok {
+			os.Args = append([]string{"tower"}, strings.Fields(args)...)
+		}
+		os.Exit(runMain(subprocessEnv()))
 	}
 	os.Exit(m.Run())
+}
+
+// subprocessEnv is the production environment of a re-executed test binary,
+// except that error notifications may only use executables below
+// TOWER_TEST_FAKE_BIN, so no real desktop notification is ever shown.
+func subprocessEnv() env {
+	fakeBin := os.Getenv("TOWER_TEST_FAKE_BIN")
+	return env{
+		resumeError: func(ctx context.Context, lookPath config.LookPath, msg string) {
+			deliverResumeError(ctx, func(f string) (string, error) {
+				p, err := lookPath(f)
+				if err != nil {
+					return "", err
+				}
+				if fakeBin == "" || !strings.HasPrefix(p, fakeBin+string(filepath.Separator)) {
+					return "", errors.New("not a fake executable")
+				}
+				return p, nil
+			}, msg)
+		},
+		openURL: func(context.Context, string) error { return errors.New("no browser in tests") },
+		tui:     func(context.Context, tea.Model) error { return errors.New("no terminal UI in subprocess tests") },
+	}
 }
 
 const credentialSentinel = "SENTINEL-token-7f3a9c"
@@ -59,16 +88,31 @@ func found(f string) (string, error) { return "/usr/bin/" + f, nil }
 
 func missing(string) (string, error) { return "", errors.New("not found") }
 
-// testEnv returns an environment rooted at dir.
+// testEnv returns an environment rooted at dir. The terminal UI quits
+// immediately, and browser, notification and login-shell hooks never reach
+// the real desktop or the user's shell.
 func testEnv(dir string, vars map[string]string, now time.Time) env {
 	return env{
 		lookup: func(k string) (string, bool) {
 			v, ok := vars[k]
 			return v, ok
 		},
+		environ: func() []string {
+			var out []string
+			for k, v := range vars {
+				out = append(out, k+"="+v)
+			}
+			return out
+		},
 		getwd:    func() (string, error) { return dir, nil },
 		now:      func() time.Time { return now },
 		lookPath: found,
+		tui:      func(context.Context, tea.Model) error { return nil },
+		openURL:  func(context.Context, string) error { return errors.New("no browser in tests") },
+		captureEnv: func(context.Context) (loginenv.Env, error) {
+			return loginenv.Env{}, errors.New("no login shell in tests")
+		},
+		resumeError: func(context.Context, config.LookPath, string) {},
 	}
 }
 
@@ -162,6 +206,22 @@ func TestUsageErrors(t *testing.T) {
 		if code, _, _ := runCLI(t, e, args...); code != 1 {
 			t.Errorf("%v: code=%d", args, code)
 		}
+	}
+}
+
+func TestHelp(t *testing.T) {
+	e := testEnv(t.TempDir(), nil, time.Now())
+	code, _, stderr := runCLI(t, e, "--help")
+	if code != 0 {
+		t.Fatalf("code=%d", code)
+	}
+	for _, want := range []string{"start the terminal UI", "resume <item-id> [--placement split|tab|window]", "config validate", "prune", "version"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("help misses %q:\n%s", want, stderr)
+		}
+	}
+	if strings.Contains(stderr, "headless") {
+		t.Errorf("help advertises the headless flag:\n%s", stderr)
 	}
 }
 
@@ -854,7 +914,7 @@ func TestPrune(t *testing.T) {
 func startTower(t *testing.T, cfgPath string, stderr *syncBuffer, extraEnv ...string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.CommandContext(t.Context(), os.Args[0]) // #nosec G204 G702 -- re-executes the test binary
-	cmd.Env = append(os.Environ(), "TOWER_TEST_RUN_MAIN=1", "TOWER_TEST_ARGS=--config "+cfgPath, "TOWER_TEST_TOKEN="+credentialSentinel)
+	cmd.Env = append(os.Environ(), "TOWER_TEST_RUN_MAIN=1", "TOWER_TEST_ARGS=--headless --config "+cfgPath, "TOWER_TEST_TOKEN="+credentialSentinel)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	cmd.Stderr = stderr
 	cmd.Stdout = stderr

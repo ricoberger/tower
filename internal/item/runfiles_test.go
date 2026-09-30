@@ -188,3 +188,146 @@ func TestReadRunFileFIFO(t *testing.T) {
 		}
 	}
 }
+
+func TestRunFileTail(t *testing.T) {
+	s := openStore(t)
+	it := newItem(t, key, 1)
+	if err := s.Create(it, nil); err != nil {
+		t.Fatal(err)
+	}
+	run := Run{Number: 1, SessionID: "sid", Reason: ReasonAuto, Skill: "sre-analyze-alert", QueuedAt: t0, Outcome: OutcomeRunning}
+	if err := s.CreateRun(it.ID, run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StatRunFile(it.ID, 1, OutputFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file: %v", err)
+	}
+	if err := s.WriteRunFile(it.ID, 1, OutputFile, []byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := s.StatRunFile(it.ID, 1, OutputFile)
+	if err != nil || fi.Size() != 10 {
+		t.Fatalf("stat: %v", err)
+	}
+	data, off, fi, err := s.ReadRunFileTail(it.ID, 1, OutputFile, 4)
+	if err != nil || string(data) != "6789" || off != 6 || fi.Size() != 10 {
+		t.Fatalf("tail = %q %d %v", data, off, err)
+	}
+	data, off, _, err = s.ReadRunFileTail(it.ID, 1, OutputFile, 100)
+	if err != nil || string(data) != "0123456789" || off != 0 {
+		t.Fatalf("whole = %q %d %v", data, off, err)
+	}
+	if _, _, _, err := s.ReadRunFileTail(it.ID, 1, OutputFile, 0); err == nil {
+		t.Error("zero limit accepted")
+	}
+	if _, _, _, err := s.ReadRunFileTail(it.ID, 1, "../item.json", 10); err == nil {
+		t.Error("unknown artifact name accepted")
+	}
+
+	// Symlinks and non-regular files are rejected.
+	dir := filepath.Join(s.ItemDir(it.ID), "runs", "1")
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, StderrFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StatRunFile(it.ID, 1, StderrFile); err == nil {
+		t.Error("StatRunFile followed a symlink")
+	}
+	if _, _, _, err := s.ReadRunFileTail(it.ID, 1, StderrFile, 10); err == nil {
+		t.Error("ReadRunFileTail followed a symlink")
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, ReportFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.ReadRunFileTail(it.ID, 1, ReportFile, 10); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("FIFO: %v", err)
+	}
+	if _, err := s.StatRunFile(it.ID, 1, ReportFile); err == nil {
+		t.Error("StatRunFile accepted a FIFO")
+	}
+}
+
+func TestRunFileSymlinksInsideStoreRejected(t *testing.T) {
+	s := openStore(t)
+	it := newItem(t, key, 1)
+	if err := s.Create(it, nil); err != nil {
+		t.Fatal(err)
+	}
+	for n := 1; n <= 2; n++ {
+		if err := s.CreateRun(it.ID, Run{Number: n, SessionID: "sid", Reason: ReasonAuto, Skill: "sre-analyze-alert", QueuedAt: t0, Outcome: OutcomeRunning}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.WriteRunFile(it.ID, 1, ReportFile, []byte("the report")); err != nil {
+		t.Fatal(err)
+	}
+	item := s.ItemDir(it.ID)
+
+	type reader struct {
+		name string
+		read func(n int, name string) error
+	}
+	readers := []reader{
+		{"ReadRunFile", func(n int, name string) error { _, err := s.ReadRunFile(it.ID, n, name); return err }},
+		{"ReadRunFileTail", func(n int, name string) error { _, _, _, err := s.ReadRunFileTail(it.ID, n, name, 1<<10); return err }},
+		{"StatRunFile", func(n int, name string) error { _, err := s.StatRunFile(it.ID, n, name); return err }},
+		{"OpenRunFile", func(n int, name string) error {
+			f, err := s.OpenRunFile(it.ID, n, name)
+			if err == nil {
+				_ = f.Close()
+			}
+			return err
+		}},
+	}
+	check := func(label string, n int, name string) {
+		t.Helper()
+		for _, r := range readers {
+			if err := r.read(n, name); err == nil {
+				t.Errorf("%s: %s accepted a symlinked target", label, r.name)
+			}
+		}
+	}
+
+	// An artifact linking to another artifact of the same run.
+	if err := os.Symlink(ReportFile, filepath.Join(item, "runs", "1", StderrFile)); err != nil {
+		t.Fatal(err)
+	}
+	check("artifact link inside the run", 1, StderrFile)
+
+	// A run directory linking to another run of the same item.
+	run2 := filepath.Join(item, "runs", "2")
+	if err := os.RemoveAll(run2); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("1", run2); err != nil {
+		t.Fatal(err)
+	}
+	check("run directory link", 2, ReportFile)
+
+	// A runs directory linking elsewhere inside the store.
+	other := newItem(t, key, 2)
+	if err := s.Create(other, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(item, "runs"), filepath.Join(s.ItemDir(other.ID), "moved-runs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(s.ItemDir(other.ID), "moved-runs"), filepath.Join(item, "runs")); err != nil {
+		t.Fatal(err)
+	}
+	check("runs directory link", 1, ReportFile)
+
+	// The regular file is still readable through the real path.
+	if err := os.Remove(filepath.Join(item, "runs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(s.ItemDir(other.ID), "moved-runs"), filepath.Join(item, "runs")); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := s.ReadRunFile(it.ID, 1, ReportFile); err != nil || string(data) != "the report" {
+		t.Fatalf("regular artifact: %q %v", data, err)
+	}
+}

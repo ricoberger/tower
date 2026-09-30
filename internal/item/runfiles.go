@@ -186,28 +186,75 @@ func (s *Store) WriteRunFile(id string, n int, name string, data []byte) error {
 	return s.writeAtomic(runRel(id, n, name), data)
 }
 
-// ReadRunFile reads a regular run artifact of at most MaxRunFileSize bytes.
-func (s *Store) ReadRunFile(id string, n int, name string) ([]byte, error) {
+// lstatRunFile checks that the directories leading to a run artifact are
+// real directories and that the artifact itself is a regular file. Symlinks
+// are rejected, even when their target stays inside the state directory.
+func (s *Store) lstatRunFile(id string, n int, name string) (fs.FileInfo, error) {
 	if err := checkIDRun(id, n); err != nil {
 		return nil, err
 	}
 	if err := checkRunFile(name); err != nil {
 		return nil, err
 	}
-	// O_NONBLOCK: opening a FIFO (or another special file) must not block
-	// before its type is checked; it has no effect on regular files.
-	f, err := s.root.OpenFile(runRel(id, n, name), os.O_RDONLY|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, err
+	for _, rel := range []string{itemsDir, itemRel(id), itemRel(id, runsDir), runRel(id, n)} {
+		fi, err := s.root.Lstat(rel)
+		if err != nil {
+			return nil, err
+		}
+		if !fi.IsDir() {
+			return nil, errors.New("unsafe run directory")
+		}
 	}
-	defer func() { _ = f.Close() }()
-	fi, err := f.Stat()
+	fi, err := s.root.Lstat(runRel(id, n, name))
 	if err != nil {
 		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", name)
 	}
+	return fi, nil
+}
+
+// OpenRunFile opens a regular run artifact for reading. Symlinked artifacts
+// or run directories are rejected, and the opened file must be the one that
+// was checked.
+func (s *Store) OpenRunFile(id string, n int, name string) (*os.File, error) {
+	want, err := s.lstatRunFile(id, n, name)
+	if err != nil {
+		return nil, err
+	}
+	return s.openChecked(runRel(id, n, name), name, want)
+}
+
+// openChecked opens the regular file rel for reading and verifies that it is
+// the file described by want, which the caller obtained with Lstat.
+func (s *Store) openChecked(rel, name string, want fs.FileInfo) (*os.File, error) {
+	// O_NONBLOCK: opening a FIFO (or another special file) swapped in after
+	// the check must not block before its type is checked; it has no effect
+	// on regular files. O_NOFOLLOW rejects a symlink swapped in meanwhile.
+	f, err := s.root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() || !os.SameFile(want, fi) {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s changed while it was opened", name)
+	}
+	return f, nil
+}
+
+// ReadRunFile reads a regular run artifact of at most MaxRunFileSize bytes.
+func (s *Store) ReadRunFile(id string, n int, name string) ([]byte, error) {
+	f, err := s.OpenRunFile(id, n, name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, MaxRunFileSize+1))
 	if err != nil {
 		return nil, err
@@ -216,6 +263,36 @@ func (s *Store) ReadRunFile(id string, n int, name string) ([]byte, error) {
 		return nil, fmt.Errorf("%s is larger than %d bytes", name, MaxRunFileSize)
 	}
 	return data, nil
+}
+
+// StatRunFile returns the file info of a regular run artifact without
+// following symlinks.
+func (s *Store) StatRunFile(id string, n int, name string) (fs.FileInfo, error) {
+	return s.lstatRunFile(id, n, name)
+}
+
+// ReadRunFileTail reads at most limit bytes from the end of a regular run
+// artifact. It returns the data, the offset of its first byte in the file
+// and the file info observed when it was opened.
+func (s *Store) ReadRunFileTail(id string, n int, name string, limit int64) ([]byte, int64, fs.FileInfo, error) {
+	if limit <= 0 {
+		return nil, 0, nil, errors.New("invalid tail size")
+	}
+	f, err := s.OpenRunFile(id, n, name)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	off := max(fi.Size()-limit, 0)
+	data, err := io.ReadAll(io.NewSectionReader(f, off, limit))
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return data, off, fi, nil
 }
 
 // HasRunFile reports whether a run artifact exists as a regular file (not a
@@ -243,6 +320,33 @@ func (s *Store) ReadAlertMarkdown(id string) ([]byte, error) {
 		return nil, err
 	}
 	return s.root.ReadFile(itemRel(id, markdownFile))
+}
+
+// OpenAlertMarkdown opens alert.md of an item for reading with the checks of
+// OpenRunFile: the items and item directories must be real directories and
+// alert.md a regular file, not a symlink.
+func (s *Store) OpenAlertMarkdown(id string) (*os.File, error) {
+	if _, _, err := ParseID(id); err != nil {
+		return nil, err
+	}
+	for _, rel := range []string{itemsDir, itemRel(id)} {
+		fi, err := s.root.Lstat(rel)
+		if err != nil {
+			return nil, err
+		}
+		if !fi.IsDir() {
+			return nil, errors.New("unsafe item directory")
+		}
+	}
+	rel := itemRel(id, markdownFile)
+	fi, err := s.root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", markdownFile)
+	}
+	return s.openChecked(rel, markdownFile, fi)
 }
 
 // AlertMarkdownPath returns the absolute path of an item's alert.md after the

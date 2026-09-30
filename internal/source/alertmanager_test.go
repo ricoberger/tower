@@ -602,11 +602,14 @@ func TestCredentialCommandGroupKilled(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			shellPID, childPID := filepath.Join(dir, "shell"), filepath.Join(dir, "child")
-			cmd := "sleep 30 & echo $! > " + childPID + "; echo $$ > " + shellPID + "; wait"
+			// The shell records itself first, so both PIDs are written once
+			// the child's is (the cancel case cancels at that point).
+			cmd := "echo $$ > " + shellPID + "; sleep 30 & echo $! > " + childPID + "; wait"
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if mode == "timeout" {
-				ctx, cancel = context.WithTimeout(ctx, 300*time.Millisecond)
+				// Room for the shell to record both PIDs on a loaded machine.
+				ctx, cancel = context.WithTimeout(ctx, 2*time.Second)
 				defer cancel()
 			} else {
 				go func() {
@@ -619,7 +622,7 @@ func TestCredentialCommandGroupKilled(t *testing.T) {
 			if err == nil {
 				t.Fatal("want error")
 			}
-			if elapsed := time.Since(start); elapsed > 3*time.Second {
+			if elapsed := time.Since(start); elapsed > 6*time.Second {
 				t.Errorf("elapsed = %s", elapsed)
 			}
 			assertDead(t, readPID(t, shellPID))

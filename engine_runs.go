@@ -13,6 +13,7 @@ import (
 	"github.com/ricoberger/tower/internal/reconcile"
 	"github.com/ricoberger/tower/internal/result"
 	"github.com/ricoberger/tower/internal/runner"
+	"github.com/ricoberger/tower/internal/snapshot"
 )
 
 // startRetryDelay is how long a queued run whose start failed without a
@@ -32,6 +33,9 @@ var (
 	ErrItemDone = errors.New("the item is already done")
 	// ErrEngineStopped is returned when the engine is not running.
 	ErrEngineStopped = errors.New("the engine is not running")
+	// ErrPollInProgress rejects a poll request while a poll round is still
+	// running.
+	ErrPollInProgress = errors.New("a poll is already in progress")
 )
 
 // ManualRunNotAllowedError rejects a manual run in a state that does not
@@ -49,6 +53,7 @@ type apiCommandKind int
 const (
 	apiManualRun apiCommandKind = iota
 	apiDismiss
+	apiPoll
 )
 
 type apiCommand struct {
@@ -83,6 +88,13 @@ func (a *engineAPI) Dismiss(ctx context.Context, itemID string) error {
 	return a.do(ctx, apiDismiss, itemID)
 }
 
+// PollNow starts a poll round of all sources. It returns ErrPollInProgress
+// while a round is still running; the round's result is applied by the
+// engine loop like every scheduled round.
+func (a *engineAPI) PollNow(ctx context.Context) error {
+	return a.do(ctx, apiPoll, "")
+}
+
 func (a *engineAPI) do(ctx context.Context, kind apiCommandKind, id string) error {
 	c := apiCommand{kind: kind, id: id, reply: make(chan error, 1)}
 	select {
@@ -110,6 +122,13 @@ type blockedStart struct {
 
 // command processes an API request on the engine loop.
 func (e *engine) command(c apiCommand) error {
+	if c.kind == apiPoll {
+		if e.inFlight {
+			return ErrPollInProgress
+		}
+		e.startRound(e.bgCtx, e.wg)
+		return nil
+	}
 	e.refresh()
 	cached, ok := e.items[c.id]
 	if !ok {
@@ -417,13 +436,36 @@ func (e *engine) notifyOutcome(ef reconcile.Effect) {
 			}
 		}
 	}
-	deliver, log, ctx := e.deliver, e.log, e.bgCtx
+	deliver, log, ctx, notified := e.deliver, e.log, e.bgCtx, e.notified
 	attrs := []any{"item_id", it.ID, "run", ef.Run, "source", it.Source.Name, "outcome", string(ef.Outcome)}
 	e.wg.Go(func() {
+		o := notifyOutcome{itemID: it.ID, title: it.Title}
 		if err := deliver(ctx, n); err != nil {
 			log.Warn("notification delivery failed", append(attrs, "error", err.Error())...)
-			return
+			o.err = err.Error()
+		} else {
+			log.Debug("notification delivered", attrs...)
 		}
-		log.Debug("notification delivered", attrs...)
+		// The loop shows the outcome in the UI; the run outcome itself is
+		// never affected by a delivery.
+		select {
+		case notified <- o:
+		case <-ctx.Done():
+		}
 	})
+}
+
+// notifyOutcome is the result of one notification delivery.
+type notifyOutcome struct {
+	itemID string
+	title  string
+	err    string
+}
+
+// notifyHealth returns the latest delivery failure for the UI.
+func (e *engine) notifyHealth() snapshot.NotifyHealth {
+	if e.notifyErr == nil {
+		return snapshot.NotifyHealth{}
+	}
+	return snapshot.NotifyHealth{LastErr: e.notifyErr.err, ItemID: e.notifyErr.itemID, ItemTitle: e.notifyErr.title}
 }

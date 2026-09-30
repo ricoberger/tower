@@ -18,6 +18,7 @@ import (
 
 	"github.com/ricoberger/tower/internal/config"
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/snapshot"
 	"github.com/ricoberger/tower/internal/source"
 )
 
@@ -1021,5 +1022,66 @@ func TestLoadDuringPruning(t *testing.T) {
 	e.load(id, item.Stamp{})
 	if strings.Count(logs.String(), "skipping unreadable item") != before || len(e.items) != 0 || len(e.unreadable) != 0 {
 		t.Fatalf("removed item reported as unreadable:\n%s", logs.String())
+	}
+}
+
+// PollNow starts an immediate round unless one is in flight, and every
+// applied state is published to the feed.
+func TestEnginePollNowAndFeed(t *testing.T) {
+	t0 := time.Date(2026, 9, 28, 9, 0, 0, 0, time.UTC)
+	cfg, _ := fakeConfig(t, "fast")
+	fast := newFakeSource("fast")
+	fast.set([]source.Alert{mkAlert(t, "fast", "aaa", t0)}, nil)
+	gate := make(chan struct{})
+	fast.setGate(gate, nil)
+	feed := snapshot.NewFeed()
+	started := make(chan struct{})
+	h := startEngine(t, engineOptions{
+		cfg: cfg, now: func() time.Time { return t0 }, sources: []source.Source{fast},
+		feed: feed, started: func() { close(started) },
+	})
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("started hook not called")
+	}
+	// The state is published before the first round completes.
+	s, ok := feed.Latest()
+	if !ok || len(s.Items) != 0 || len(s.Sources) != 1 || s.Sources[0].Name != "fast" || s.Concurrency != cfg.Runs.Concurrency {
+		t.Fatalf("initial snapshot %+v", s)
+	}
+
+	h.wait(h.started, "startup round")
+	if err := h.api.PollNow(t.Context()); !errors.Is(err, ErrPollInProgress) {
+		t.Fatalf("PollNow during a round = %v", err)
+	}
+	close(gate)
+	h.wait(h.applied, "startup round applied")
+	eventually(t, "published round", func() bool {
+		s, _ := feed.Latest()
+		return len(s.Items) == 1 && s.Sources[0].LastErr == "" && !s.Sources[0].LastSuccess.IsZero()
+	})
+
+	if err := h.api.PollNow(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	h.wait(h.started, "requested round")
+	h.wait(h.applied, "requested round applied")
+	if fast.callCount() != 2 {
+		t.Fatalf("calls = %d", fast.callCount())
+	}
+
+	// Snapshots are copies: changing one does not change the engine's
+	// state.
+	s, _ = feed.Latest()
+	s.Items[0].Item.Title = "changed"
+	h.doTick()
+	if s2, _ := feed.Latest(); s2.Items[0].Item.Title == "changed" {
+		t.Fatal("snapshot shares engine state")
+	}
+
+	h.stop()
+	if err := h.api.PollNow(t.Context()); !errors.Is(err, ErrEngineStopped) {
+		t.Fatalf("PollNow after stop = %v", err)
 	}
 }

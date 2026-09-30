@@ -95,13 +95,16 @@ func waitGone(t *testing.T, logDir, name string) {
 	t.Fatalf("descendant %d survived the delivery", pid)
 }
 
+// newNotifier returns a notifier for the fake executables. Its timeout is
+// generous so successful deliveries do not fail on a loaded machine; tests
+// of the deadline shorten it.
 func newNotifier(exe, config string) *Notifier {
 	return &Notifier{
 		Sound:      "default",
 		ConfigPath: config,
 		Executable: func() (string, error) { return exe, nil },
 		LookPath:   exec.LookPath,
-		Timeout:    300 * time.Millisecond,
+		Timeout:    10 * time.Second,
 		WaitDelay:  100 * time.Millisecond,
 	}
 }
@@ -322,6 +325,7 @@ func TestDeliveryDeadline(t *testing.T) {
 			logDir := fakeBin(t, name)
 			t.Setenv("FAKE_NOTIFY_MODE", "hang")
 			n := newNotifier("/bin/tower", "/c.yaml")
+			n.Timeout = 300 * time.Millisecond
 			start := time.Now()
 			err := n.Deliver(context.Background(), x)
 			elapsed := time.Since(start)
@@ -338,7 +342,6 @@ func TestDeliveryDeadline(t *testing.T) {
 		logDir := fakeBin(t, "terminal-notifier")
 		t.Setenv("FAKE_NOTIFY_MODE", "pipe")
 		n := newNotifier("/bin/tower", "/c.yaml")
-		n.Timeout = 5 * time.Second
 		start := time.Now()
 		if err := n.Deliver(context.Background(), x); err != nil {
 			t.Fatalf("err = %v", err)
@@ -348,4 +351,42 @@ func TestDeliveryDeadline(t *testing.T) {
 		}
 		waitGone(t, logDir, "terminal-notifier")
 	})
+}
+
+func TestErrorNotification(t *testing.T) {
+	logDir := fakeBin(t, "terminal-notifier", "osascript")
+	n := newNotifier("/opt/tower/bin/tower", "/etc/tower/config.yaml")
+	if err := n.DeliverError(context.Background(), TitleResumeFailed, "ghostty.command: ghostty-new failed"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"-title", "tower — resume failed", "-message", "ghostty.command: ghostty-new failed", "-sound", "default"}
+	got := recorded(t, logDir, "terminal-notifier")
+	if !slices.Equal(got, want) {
+		t.Errorf("args =\n%q\nwant\n%q", got, want)
+	}
+	// Error notifications never offer a click action.
+	if slices.Contains(got, "-execute") || invoked(logDir, "osascript") {
+		t.Errorf("args = %q", got)
+	}
+
+	// The osascript fallback passes the content as arguments.
+	n.LookPath = func(name string) (string, error) {
+		if name == "osascript" {
+			return "/usr/bin/osascript", nil
+		}
+		return "", errors.New("not found")
+	}
+	n.Sound = ""
+	path, args, err := n.ErrorCommand(TitleResumeFailed, strings.Repeat("x", 250))
+	if err != nil || path != "/usr/bin/osascript" {
+		t.Fatalf("%q %v", path, err)
+	}
+	if len(args) != 9 || args[3] != "display notification (item 1 of argv) with title (item 2 of argv)" ||
+		utf8.RuneCountInString(args[7]) != 200 || args[8] != TitleResumeFailed {
+		t.Errorf("args = %q", args)
+	}
+	n.LookPath = func(string) (string, error) { return "", errors.New("not found") }
+	if err := n.DeliverError(context.Background(), TitleResumeFailed, "m"); err == nil {
+		t.Error("delivered without a notifier")
+	}
 }

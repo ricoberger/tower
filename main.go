@@ -9,12 +9,18 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/ricoberger/tower/internal/config"
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/loginenv"
+	"github.com/ricoberger/tower/internal/notify"
+	"github.com/ricoberger/tower/internal/runner"
 )
 
 // Set via -ldflags by `make build`.
@@ -24,23 +30,77 @@ var (
 	date    = "unknown"
 )
 
-// env abstracts the process environment for tests.
+// env abstracts the process environment for tests. Nil fields select the
+// production behavior.
 type env struct {
 	lookup   config.LookupEnv
 	getwd    func() (string, error)
 	now      func() time.Time
 	lookPath config.LookPath
+	// environ returns the caller's environment (os.Environ).
+	environ func() []string
+	// tui runs the terminal UI until it quits or ctx is cancelled.
+	tui func(ctx context.Context, m tea.Model) error
+	// openURL opens a URL in the browser.
+	openURL func(ctx context.Context, url string) error
+	// captureEnv captures the interactive login-shell environment.
+	captureEnv func(ctx context.Context) (loginenv.Env, error)
+	// resumeError shows a resume failure as a desktop notification.
+	resumeError func(ctx context.Context, lookPath config.LookPath, msg string)
+	// processOwns verifies that a recorded PID still runs a session.
+	processOwns func(pid int, sessionID string) bool
+	// deliver overrides the engine's notification delivery (nil: desktop
+	// notifications).
+	deliver func(ctx context.Context, n notify.Notification) error
+	// engineOptions adjusts the engine options of the terminal UI mode
+	// (tests: tickers, hooks and runner timing).
+	engineOptions func(*engineOptions)
+}
+
+// withDefaults fills unset fields with the production behavior.
+func (e env) withDefaults() env {
+	if e.lookup == nil {
+		e.lookup = os.LookupEnv
+	}
+	if e.getwd == nil {
+		e.getwd = os.Getwd
+	}
+	if e.now == nil {
+		e.now = time.Now
+	}
+	if e.lookPath == nil {
+		e.lookPath = exec.LookPath
+	}
+	if e.environ == nil {
+		e.environ = os.Environ
+	}
+	if e.tui == nil {
+		e.tui = runProgram
+	}
+	if e.openURL == nil {
+		e.openURL = openBrowser
+	}
+	if e.captureEnv == nil {
+		e.captureEnv = captureLoginEnv(e)
+	}
+	if e.resumeError == nil {
+		e.resumeError = deliverResumeError
+	}
+	if e.processOwns == nil {
+		e.processOwns = runner.ProcessOwns
+	}
+	return e
 }
 
 func main() {
+	os.Exit(runMain(env{}))
+}
+
+// runMain runs tower with the process arguments until a signal arrives.
+func runMain(e env) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr, env{
-		lookup: os.LookupEnv,
-		getwd:  os.Getwd,
-		now:    time.Now,
-	})
-	stop()
-	os.Exit(code)
+	defer stop()
+	return run(ctx, os.Args[1:], os.Stdout, os.Stderr, e)
 }
 
 type globalFlags struct {
@@ -57,7 +117,9 @@ func (g *globalFlags) register(fs *flag.FlagSet) {
 const usage = `Usage: tower [--config <file>] [--log-level debug|info|warn|error] [command]
 
 Commands:
-  (none)                                     run the engine (headless until the TUI exists)
+  (none)                                     start the terminal UI and the engine
+  resume <item-id> [--placement split|tab|window]
+                                             resume the item's latest Copilot session in Ghostty
   config init                                write a commented example config if none exists
   config validate                            validate the config and print warnings/errors
   prune [--older-than <dur>] [--dry-run]     delete done items older than the duration
@@ -72,10 +134,11 @@ func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, e env) int {
+	e = e.withDefaults()
 	g := &globalFlags{logLevel: "info"}
 	fs := newFlagSet("tower", stderr)
 	g.register(fs)
-	// Hidden: keeps headless operation available once the TUI is the default.
+	// Hidden: runs the engine without the terminal UI.
 	fs.BoolVar(&g.headless, "headless", false, "")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -98,6 +161,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, e env) in
 	switch {
 	case len(rest) == 0:
 		cmd = func() int { return cmdEngine(ctx, g, stderr, e) }
+	case rest[0] == "resume":
+		// Resume reports its own errors, including invalid arguments, as a
+		// notification: it is usually started without a terminal.
+		return cmdResume(ctx, g, rest[1:], stdout, stderr, e)
 	case rest[0] == "config":
 		if len(rest) < 2 {
 			_, _ = fmt.Fprintln(stderr, "error: expected \"config init\" or \"config validate\"")
@@ -194,12 +261,16 @@ func cmdEngine(ctx context.Context, g *globalFlags, stderr io.Writer, e env) int
 	if cfg == nil {
 		return 1
 	}
+	if !g.headless {
+		return runTUI(ctx, cfg, level, stderr, e)
+	}
 	if err := runEngine(ctx, engineOptions{
 		cfg:      cfg,
 		level:    level,
 		stderr:   stderr,
 		now:      e.now,
 		lookPath: e.lookPath,
+		deliver:  e.deliver,
 	}); err != nil {
 		_, _ = fmt.Fprintln(stderr, "error:", err)
 		return 1
