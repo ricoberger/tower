@@ -101,12 +101,11 @@ const (
 	phaseCleanup
 )
 
-// ownershipVerdict is the result of a completed ownership check, valid only
-// for the step that processes it.
+// ownershipVerdict is a successful ownership check: it authorizes sig in
+// phase, only during the step that processes it.
 type ownershipVerdict struct {
 	sig   syscall.Signal
 	phase signalPhase
-	owned bool
 }
 
 // StartError is a failed start. If Run is set, the failed attempt was
@@ -495,17 +494,25 @@ func (r *Runner) HandleWait(w WaitResult) []Completion {
 	return r.step(t, false)
 }
 
-// HandleOwnership processes the result of an ownership check. The step it
-// triggers re-evaluates whether the signal is still needed: only then is it
-// sent (verified) or is the run abandoned (not verified). The verdict is
-// never reused for a later signal.
+// HandleOwnership processes the result of an ownership check. A failed
+// check abandons the run (no retry, whatever changed while it was in
+// flight): it is finalized with its forced outcome kept and its slot is
+// released without signalling. A verified check authorizes only the signal
+// it was requested for; the step it triggers re-evaluates whether that
+// signal is still needed. The verdict is never reused for a later signal.
 func (r *Runner) HandleOwnership(res OwnershipResult) []Completion {
 	t := res.t
 	if cur, ok := r.runs[t.itemID]; !ok || cur != t || !t.verifying {
 		return nil
 	}
 	t.verifying = false
-	t.verdict = &ownershipVerdict{sig: res.sig, phase: res.phase, owned: res.owned}
+	if !res.owned {
+		t.abandoned = true
+		r.logger(t).Info("skipping process group signal: the re-attached run's ownership could not be verified; releasing its slot",
+			"pid", t.run.PID, "signal", res.sig.String())
+		return r.step(t, false)
+	}
+	t.verdict = &ownershipVerdict{sig: res.sig, phase: res.phase}
 	out := r.step(t, false)
 	t.verdict = nil
 	return out
@@ -579,10 +586,10 @@ func (r *Runner) expired(t *tracked, now time.Time) bool {
 
 // signal sends sig to the run's process group and reports whether it was
 // sent. Locally started runs are signalled directly. Re-attached runs are
-// verified afresh before every signal: without a verdict for this signal
-// an asynchronous check is started (at most one per run) and the signal is
-// requested again by the step that processes its result; on a failed check
-// the run is abandoned without signalling.
+// verified afresh before every signal: without a verified check for this
+// signal an asynchronous check is started (at most one per run) and the
+// signal is requested again by the step that processes its result; a
+// failed check abandons the run (HandleOwnership).
 func (r *Runner) signal(t *tracked, sig syscall.Signal, phase signalPhase) bool {
 	if t.abandoned {
 		return false
@@ -590,14 +597,8 @@ func (r *Runner) signal(t *tracked, sig syscall.Signal, phase signalPhase) bool 
 	if !t.local {
 		v := t.verdict
 		t.verdict = nil
-		switch {
-		case v == nil || v.sig != sig || v.phase != phase:
+		if v == nil || v.sig != sig || v.phase != phase {
 			r.verify(t, sig, phase)
-			return false
-		case !v.owned:
-			t.abandoned = true
-			r.logger(t).Info("skipping process group signal: the re-attached run's ownership could not be verified; releasing its slot",
-				"pid", t.run.PID, "signal", sig.String())
 			return false
 		}
 	}

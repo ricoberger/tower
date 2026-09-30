@@ -1462,3 +1462,75 @@ func TestLocalSignalsWithoutOwnershipCheck(t *testing.T) {
 		t.Errorf("ownership checks for a local run: %d", calls.Load())
 	}
 }
+
+// A failed ownership check abandons the run even when completion evidence
+// arrived while it was in flight (moving the run from termination to
+// cleanup): no second check, no signal, the timeout outcome is kept and
+// the slot is released.
+func TestOwnershipFailureAcrossCompletion(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_COPILOT_MODE", "hang")
+	it := e.item(t, "abc", 1)
+	startDetached(t, e, it)
+	owns, sigs := newGatedOwns(), &signalRecorder{}
+	r := e.runner(t, func(o *Options) {
+		o.Owns = owns.owns
+		o.Signal = sigs.signal
+	})
+	if adopted, _ := r.Recover(it.ID, "dev", e.meta(t, it.ID, 1)); !adopted {
+		t.Fatal("not adopted")
+	}
+	before := owns.calls.Load()
+	owns.gated.Store(true)
+	e.clock.Advance(2 * time.Hour)
+	if c := r.Check(); len(c) != 0 {
+		t.Fatalf("completions = %+v", c)
+	}
+	owns.waitEntered(t)
+
+	// Completion evidence arrives while the pre-TERM check is pending; the
+	// wrapper's group is still alive, so cleanup would need a signal.
+	exitFile := filepath.Join(e.store.ItemDir(it.ID), "runs", "1", item.ExitCodeFile)
+	if err := os.WriteFile(exitFile, []byte("0\n"), 0o600); err != nil { // #nosec G703 -- test file
+		t.Fatal(err)
+	}
+	c := r.Check()
+	if len(c) != 1 || c[0].Run.Outcome != item.OutcomeFailed || c[0].Run.Error != "timeout after 1h" {
+		t.Fatalf("completions = %+v", c)
+	}
+	if r.Busy() != 1 {
+		t.Fatal("slot released before the pending check returned")
+	}
+
+	res := owns.resolve(t, r, 100*time.Millisecond, false)
+	// A retry would now be verified and signal.
+	owns.gated.Store(false)
+	if c := r.HandleOwnership(res); len(c) != 0 {
+		t.Fatalf("completions = %+v", c)
+	}
+	if r.Busy() != 0 {
+		t.Fatal("slot not released after the failed check")
+	}
+	for range 5 {
+		if c := r.Check(); len(c) != 0 {
+			t.Fatalf("completions = %+v", c)
+		}
+		select {
+		case o := <-r.OwnershipC():
+			r.HandleOwnership(o)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if n := owns.calls.Load(); n != before+1 {
+		t.Errorf("ownership checks = %d, want %d (retried)", n, before+1)
+	}
+	if s := sigs.list(); len(s) != 0 {
+		t.Errorf("signals sent after the failed check: %v", s)
+	}
+	if m := e.meta(t, it.ID, 1); m.Outcome != item.OutcomeFailed || m.Error != "timeout after 1h" {
+		t.Errorf("persisted %+v", m)
+	}
+	if !strings.Contains(e.logs.String(), "ownership could not be verified") {
+		t.Errorf("logs:\n%s", e.logs)
+	}
+}
