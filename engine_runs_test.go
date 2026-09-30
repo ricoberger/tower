@@ -1125,3 +1125,135 @@ func TestRunDefaultNotifierTarget(t *testing.T) {
 		t.Fatalf("args = %q, want %q", args, want)
 	}
 }
+
+// blockingOwns is an ownership check whose second and later calls (the
+// checks before signals; the first is the adoption at startup) block for
+// delay and then report verdict.
+type blockingOwns struct {
+	calls    atomic.Int32
+	delay    time.Duration
+	verdict  bool
+	entered  chan struct{}
+	returned atomic.Bool
+}
+
+func (b *blockingOwns) owns(pid int, sid string) bool {
+	if b.calls.Add(1) == 1 {
+		return runner.ProcessOwns(pid, sid)
+	}
+	b.entered <- struct{}{}
+	time.Sleep(b.delay)
+	defer b.returned.Store(true)
+	return b.verdict && runner.ProcessOwns(pid, sid)
+}
+
+// The ownership check before signalling a timed-out re-attached run runs
+// off the engine loop: ticks, polls, monitor passes, other runs' Wait
+// results and API requests are handled while it blocks, and TERM is sent
+// only after it returns true.
+func TestRunOwnershipCheckOffLoop(t *testing.T) {
+	rt := newRunTest(t, 2, "")
+	rt.hold()
+	rt.setAlerts(rt.alert("aaa", "critical", 2*time.Hour), rt.alert("bbb", "critical", 2*time.Hour))
+	sid := "3f3d2c4b-1a2b-4c3d-8e9f-0123456789ab"
+	pid, _ := ownedProcess(t, sid)
+	rt.seed("aaa", item.StatePreparing, 1, nil, runningRun(1, pid, sid, item.ReasonAuto, rt.t0.Add(-19*time.Minute)))
+
+	owns := &blockingOwns{delay: 3 * time.Second, verdict: true, entered: make(chan struct{}, 4)}
+	var terms, early atomic.Int32
+	h := rt.start(func(o *engineOptions) {
+		o.runner.Owns = owns.owns
+		o.runner.Signal = func(pid int, sig syscall.Signal) error {
+			if sig == syscall.SIGTERM {
+				terms.Add(1)
+				if !owns.returned.Load() {
+					early.Add(1)
+				}
+			}
+			return syscall.Kill(pid, sig)
+		}
+	})
+	rt.waitState("bbb", item.StatePreparing)
+	eventually(t, "bbb started", func() bool { return len(rt.starts()) == 1 })
+
+	// aaa times out; its ownership check blocks.
+	rt.clock.add(2 * time.Minute)
+	select {
+	case <-owns.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("ownership check not started")
+	}
+	begin := time.Now()
+	h.doTick()
+	h.send(h.poll)
+	h.wait(h.applied, "poll round")
+	for range 3 {
+		h.wait(h.monitored, "monitor pass")
+	}
+	var notAllowed *ManualRunNotAllowedError
+	if err := h.api.ManualRun(t.Context(), id("aaa")); !errors.As(err, &notAllowed) {
+		t.Fatalf("ManualRun = %v", err)
+	}
+	rt.release("bbb")
+	rt.waitState("bbb", item.StateNeedsYou)
+	if n := waitDelivery(t, h); n.ItemID != id("bbb") {
+		t.Fatalf("notification = %+v", n)
+	}
+	if owns.returned.Load() || time.Since(begin) >= owns.delay {
+		t.Fatalf("the loop was not responsive while the check blocked (%s)", time.Since(begin))
+	}
+	if terms.Load() != 0 || rt.state("aaa") != item.StatePreparing || !pidAlive(pid) {
+		t.Fatal("aaa was signalled or finished before the check returned")
+	}
+
+	// The verified TERM ends aaa with the timeout outcome.
+	r := rt.waitOutcome("aaa", 1, item.OutcomeFailed)
+	if r.Error != "timeout after 20m" {
+		t.Fatalf("run = %+v", r)
+	}
+	eventually(t, "group terminated", func() bool { return syscall.Kill(-pid, 0) != nil })
+	if terms.Load() != 1 || early.Load() != 0 || owns.calls.Load() != 2 {
+		t.Fatalf("terms=%d early=%d checks=%d", terms.Load(), early.Load(), owns.calls.Load())
+	}
+}
+
+// A check that fails after a delay abandons the run without signalling:
+// the timeout outcome is kept and the slot is released.
+func TestRunOwnershipCheckFailsOffLoop(t *testing.T) {
+	rt := newRunTest(t, 1, "")
+	rt.setAlerts(rt.alert("aaa", "critical", 2*time.Hour), rt.alert("bbb", "critical", time.Hour))
+	sid := "4f3d2c4b-1a2b-4c3d-8e9f-0123456789ab"
+	pid, _ := ownedProcess(t, sid)
+	rt.seed("aaa", item.StatePreparing, 1, nil, runningRun(1, pid, sid, item.ReasonAuto, rt.t0.Add(-19*time.Minute)))
+
+	owns := &blockingOwns{delay: time.Second, entered: make(chan struct{}, 4)}
+	var sigs atomic.Int32
+	h := rt.start(func(o *engineOptions) {
+		o.runner.Owns = owns.owns
+		o.runner.Signal = func(pid int, sig syscall.Signal) error {
+			if sig != 0 {
+				sigs.Add(1)
+			}
+			return syscall.Kill(pid, sig)
+		}
+	})
+	if s := rt.state("bbb"); s != item.StateQueued {
+		t.Fatalf("bbb = %s", s)
+	}
+	rt.clock.add(2 * time.Minute)
+	r := rt.waitOutcome("aaa", 1, item.OutcomeFailed)
+	if r.Error != "timeout after 20m" {
+		t.Fatalf("run = %+v", r)
+	}
+	if !owns.returned.Load() {
+		t.Fatal("finalized before the check returned")
+	}
+	// The slot is released for bbb; aaa's process was not signalled.
+	rt.waitState("bbb", item.StatePreparing)
+	if sigs.Load() != 0 || !pidAlive(pid) {
+		t.Fatal("the unverified process group was signalled")
+	}
+	if !strings.Contains(h.stderr.String(), "ownership could not be verified") {
+		t.Fatalf("logs:\n%s", h.stderr.String())
+	}
+}
