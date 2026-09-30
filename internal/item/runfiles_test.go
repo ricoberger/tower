@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestRunFiles(t *testing.T) {
@@ -148,5 +150,41 @@ func TestRunPathContainment(t *testing.T) {
 	}
 	if p, err := s.AlertMarkdownPath(it.ID); err != nil || p != filepath.Join(s.ItemDir(it.ID), "alert.md") {
 		t.Errorf("AlertMarkdownPath = %q %v", p, err)
+	}
+}
+
+// A FIFO artifact without a writer is rejected instead of blocking the
+// reader.
+func TestReadRunFileFIFO(t *testing.T) {
+	s := openStore(t)
+	it := newItem(t, key, 1)
+	if err := s.Create(it, nil); err != nil {
+		t.Fatal(err)
+	}
+	run := Run{Number: 1, SessionID: "sid", Reason: ReasonAuto, Skill: "sre-analyze-alert", QueuedAt: t0, Outcome: OutcomeRunning}
+	if err := s.CreateRun(it.ID, run); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{ReportFile, ResultFile} {
+		if err := syscall.Mkfifo(filepath.Join(s.ItemDir(it.ID), "runs", "1", name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			_, err := s.ReadRunFile(it.ID, 1, name)
+			done <- err
+		}()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+				t.Fatalf("%s: err = %v", name, err)
+			}
+		case <-time.After(5 * time.Second):
+			// Unblock the reader before failing.
+			if f, err := os.OpenFile(filepath.Join(s.ItemDir(it.ID), "runs", "1", name), os.O_WRONLY, 0); err == nil {
+				_ = f.Close()
+			}
+			t.Fatalf("%s: ReadRunFile blocked on a FIFO", name)
+		}
 	}
 }

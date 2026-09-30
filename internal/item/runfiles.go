@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"os"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"gopkg.in/yaml.v3"
 )
@@ -192,7 +194,9 @@ func (s *Store) ReadRunFile(id string, n int, name string) ([]byte, error) {
 	if err := checkRunFile(name); err != nil {
 		return nil, err
 	}
-	f, err := s.root.Open(runRel(id, n, name))
+	// O_NONBLOCK: opening a FIFO (or another special file) must not block
+	// before its type is checked; it has no effect on regular files.
+	f, err := s.root.OpenFile(runRel(id, n, name), os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
 	}
