@@ -477,17 +477,19 @@ func (e *engine) initMarkdown(id string, c *cachedItem) {
 	}
 }
 
-func (e *engine) reconcile() { e.reconcileWith(nil) }
+func (e *engine) reconcile() { _, _, _ = e.reconcileWith(nil) }
 
 // reconcileWith runs a reconciliation pass with the given runner or user
 // events (plus runner events pending from failed writes) and applies its
-// result. It returns the result and the write errors by item ID.
-func (e *engine) reconcileWith(events []reconcile.Event) (reconcile.Result, map[string]error) {
+// result. It returns the result and the write errors by item ID, or an
+// error if the pass could not run; runner events are then retained for the
+// next pass, user requests are not.
+func (e *engine) reconcileWith(events []reconcile.Event) (reconcile.Result, map[string]error, error) {
 	counters, err := e.store.Counters()
 	if err != nil {
 		e.log.Error("read item counters; skipping reconciliation", "error", err)
 		e.pending = append(e.pending, runnerEvents(events)...)
-		return reconcile.Result{}, map[string]error{}
+		return reconcile.Result{}, nil, fmt.Errorf("read item counters: %w", err)
 	}
 	events = append(e.pending, events...)
 	e.pending = nil
@@ -515,7 +517,7 @@ func (e *engine) reconcileWith(events []reconcile.Event) (reconcile.Result, map[
 			e.pending = append(e.pending, ev)
 		}
 	}
-	return res, failed
+	return res, failed, nil
 }
 
 // runnerEvents returns the runner events of events. Unlike user requests,

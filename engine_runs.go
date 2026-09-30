@@ -134,7 +134,10 @@ func (e *engine) command(c apiCommand) error {
 		}
 		ev = reconcile.Event{Kind: reconcile.EventDismiss, ItemID: c.id}
 	}
-	res, failed := e.reconcileWith([]reconcile.Event{ev})
+	res, failed, err := e.reconcileWith([]reconcile.Event{ev})
+	if err != nil {
+		return fmt.Errorf("request not applied: %w", err)
+	}
 	if err := failed[c.id]; err != nil {
 		return fmt.Errorf("persist item: %w", err)
 	}
@@ -225,7 +228,7 @@ func (e *engine) recoverRuns() {
 		}
 	}
 	if len(events) > 0 {
-		e.reconcileWith(events)
+		_, _, _ = e.reconcileWith(events)
 	}
 	// Runs whose exit code was written while tower was stopped complete
 	// now; a done item's still executing run is cancelled.
@@ -266,7 +269,7 @@ func (e *engine) handleCompletions(cs []runner.Completion) {
 		}
 		events = append(events, reconcile.Event{Kind: reconcile.EventRunFinished, ItemID: c.ItemID, Run: c.Run})
 	}
-	e.reconcileWith(events)
+	_, _, _ = e.reconcileWith(events)
 }
 
 // entryFor returns the queue entry of an item that is queued for its next
@@ -368,7 +371,7 @@ func (e *engine) schedule() {
 			"source", it.Source.Name, "error", err, "retry_after", startRetryDelay.String())
 	}
 	if len(events) > 0 {
-		e.reconcileWith(events)
+		_, _, _ = e.reconcileWith(events)
 	}
 }
 

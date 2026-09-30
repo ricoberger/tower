@@ -838,6 +838,43 @@ func TestRunSourceFailureIndependence(t *testing.T) {
 	rt.waitState("aaa", item.StateNeedsYou)
 }
 
+// API requests that cannot be reconciled report an error and change
+// nothing.
+func TestRunAPIReconcileFailure(t *testing.T) {
+	rt := newRunTest(t, 2, "")
+	rt.setAlerts(rt.alert("young", "critical", time.Minute))
+	h := rt.start(nil)
+	rt.waitState("young", item.StateNew)
+	counters := filepath.Join(rt.stateDir, "counters.yaml")
+	orig, err := os.ReadFile(counters) // #nosec G304 -- test state
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(t, counters, "{not yaml")
+	before := len(rt.item("young").History)
+	ctx := t.Context()
+	for name, call := range map[string]func() error{
+		"manual run": func() error { return h.api.ManualRun(ctx, id("young")) },
+		"dismiss":    func() error { return h.api.Dismiss(ctx, id("young")) },
+	} {
+		if err := call(); err == nil || !strings.Contains(err.Error(), "counters") {
+			t.Fatalf("%s = %v", name, err)
+		}
+		if it := rt.item("young"); it.State != item.StateNew || len(it.History) != before || it.Runs.PendingReason != nil {
+			t.Fatalf("%s changed the item: %+v", name, it)
+		}
+	}
+	if len(rt.runs("young")) != 0 || len(rt.starts()) != 0 {
+		t.Fatal("a failed request started work")
+	}
+	// Once the counters are readable again, the request is accepted.
+	writeFixture(t, counters, string(orig))
+	if err := h.api.ManualRun(ctx, id("young")); err != nil {
+		t.Fatal(err)
+	}
+	rt.waitState("young", item.StateNeedsYou)
+}
+
 // AC12: the manual run API.
 func TestRunManualAPI(t *testing.T) {
 	rt := newRunTest(t, 2, "")
