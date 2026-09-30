@@ -1115,3 +1115,57 @@ func TestResumeGuards(t *testing.T) {
 		t.Fatalf("stale confirmation resumed: %+v footer %q", f.resume, f.d.m.Footer())
 	}
 }
+
+func TestFooterHintsClearAfterTimeout(t *testing.T) {
+	f := newFixture(t, nil)
+	f.add("a", item.StateNeedsYou, "critical", t0.Add(-time.Hour), finishedRun(1, item.OutcomeReady, t0.Add(-time.Hour)))
+	f.snapshot()
+	keymap := "p prep now"
+	heartbeat := func(d time.Duration) {
+		f.now = t0.Add(d)
+		f.d.send(HeartbeatMsg(f.now))
+	}
+
+	f.d.keys("p")
+	if f.d.m.Footer() != "preparation run requested" || strings.Contains(f.view(), keymap) {
+		t.Fatalf("footer %q", f.d.m.Footer())
+	}
+	heartbeat(HintTimeout - time.Second)
+	if f.d.m.Footer() != "preparation run requested" {
+		t.Fatalf("hint cleared early: %q", f.d.m.Footer())
+	}
+	heartbeat(HintTimeout)
+	if f.d.m.Footer() != "" || !strings.Contains(f.view(), keymap) {
+		t.Fatalf("hint not cleared: %q", f.d.m.Footer())
+	}
+
+	// A newer hint restarts the timeout; error hints clear as well.
+	f.engine.errs["poll"] = errors.New("poll failed")
+	f.d.keys("r")
+	if f.d.m.Footer() != "poll failed" || !f.d.m.footerErr {
+		t.Fatalf("footer %q", f.d.m.Footer())
+	}
+	heartbeat(2*HintTimeout - time.Second)
+	if f.d.m.Footer() != "poll failed" {
+		t.Fatalf("newer hint cleared early: %q", f.d.m.Footer())
+	}
+	heartbeat(2 * HintTimeout)
+	if f.d.m.Footer() != "" || !strings.Contains(f.view(), keymap) {
+		t.Fatalf("error hint not cleared: %q", f.d.m.Footer())
+	}
+
+	// Confirmations are not hints: they stay until answered.
+	f.d.keys("x")
+	heartbeat(time.Hour)
+	if !strings.Contains(f.view(), `Dismiss "Alert a"? y to confirm`) {
+		t.Fatalf("confirmation cleared:\n%s", f.view())
+	}
+	f.d.keys("n")
+	if f.d.m.Footer() != "cancelled" {
+		t.Fatalf("footer %q", f.d.m.Footer())
+	}
+	heartbeat(time.Hour + HintTimeout)
+	if f.d.m.Footer() != "" {
+		t.Fatalf("hint not cleared: %q", f.d.m.Footer())
+	}
+}

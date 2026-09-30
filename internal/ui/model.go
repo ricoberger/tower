@@ -20,6 +20,10 @@ import (
 // shutdown before it is killed.
 const EditorStopDelay = 5 * time.Second
 
+// HintTimeout is how long a footer hint is shown before the footer returns
+// to the key hints. Confirmations stay until they are answered.
+const HintTimeout = 5 * time.Second
+
 // DoneWindow is how recently a done item must have been updated to be shown
 // in the Done group.
 const DoneWindow = 7 * 24 * time.Hour
@@ -165,6 +169,8 @@ type Model struct {
 
 	footer    string
 	footerErr bool
+	// footerAt is when the footer hint was set.
+	footerAt time.Time
 
 	scroll int
 	// helpScroll is the scroll offset of the help overlay.
@@ -226,6 +232,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(waitFeed(m.ctx, m.opts.Feed), m.loadPreview())
 	case HeartbeatMsg:
 		m.now = m.opts.Now()
+		if m.footer != "" && m.now.Sub(m.footerAt) >= HintTimeout {
+			m.setHint("", false)
+		}
 		m.rebuild()
 		return m, tea.Batch(m.tick(), m.loadPreview())
 	case tea.KeyPressMsg:
@@ -258,8 +267,11 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// setHint shows a footer hint; it is cleared on the first heartbeat
+// HintTimeout after it was set.
 func (m *Model) setHint(text string, isErr bool) {
 	m.footer, m.footerErr = text, isErr
+	m.footerAt = m.opts.Now()
 }
 
 func (m *Model) hintErr(err error) tea.Msg {
