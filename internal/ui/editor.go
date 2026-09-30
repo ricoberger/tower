@@ -98,6 +98,13 @@ func (c *EditorCommand) Run() error {
 		cmd.SysProcAttr.Ctty = tty
 	}
 	if err := cmd.Start(); err != nil {
+		if tty >= 0 && !isForeground(tty) {
+			// The child made its group the foreground job before its exec
+			// failed (for example a script with a missing interpreter);
+			// tower, the foreground job before the start, takes the
+			// terminal back from that ended group.
+			_ = setForeground(tty, syscall.Getpgrp())
+		}
 		return err
 	}
 	defer func() { _ = cmd.Process.Release() }()

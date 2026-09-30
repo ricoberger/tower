@@ -153,22 +153,36 @@ func TestEditorExitSignalsNothing(t *testing.T) {
 // editor is the terminal's foreground job while it runs, suspending it with
 // ctrl+z suspends tower like any job (or is a no-op without job control),
 // continuing tower gives the editor the terminal back, and tower is the
-// foreground job again once the editor exited.
+// foreground job again once the editor exited, also when starting the
+// editor failed after the terminal was handed over.
 func TestEditorTerminalJobControl(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		shell bool
+		// launchFails uses an editor whose exec fails after the fork
+		// (a script with a missing interpreter).
+		launchFails bool
 	}{
-		{"tower run by a job control shell", true},
-		{"tower without job control", false},
+		{"tower run by a job control shell", true, false},
+		{"tower without job control", false, false},
+		{"editor fails to start under a job control shell", true, true},
+		{"editor fails to start without job control", false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			master, slave := openPTY(t)
 			dir := t.TempDir()
 			pidFile := filepath.Join(dir, "pid")
-			editor := writeEditor(t, dir, "echo $$ >"+shQuote(pidFile+".tmp")+"\nmv "+shQuote(pidFile+".tmp")+" "+shQuote(pidFile)+
-				"\nread first\necho \"$first\" >"+shQuote(filepath.Join(dir, "first"))+
-				"\nread second\necho \"$second\" >"+shQuote(filepath.Join(dir, "second")))
+			var editor string
+			if tc.launchFails {
+				editor = filepath.Join(dir, "broken editor")
+				if err := os.WriteFile(editor, []byte("#!"+filepath.Join(dir, "missing interpreter")+"\n"), 0o700); err != nil { // #nosec G306 -- executable test fixture
+					t.Fatal(err)
+				}
+			} else {
+				editor = writeEditor(t, dir, "echo $$ >"+shQuote(pidFile+".tmp")+"\nmv "+shQuote(pidFile+".tmp")+" "+shQuote(pidFile)+
+					"\nread first\necho \"$first\" >"+shQuote(filepath.Join(dir, "first"))+
+					"\nread second\necho \"$second\" >"+shQuote(filepath.Join(dir, "second")))
+			}
 			role := "tower"
 			if tc.shell {
 				role = "shell"
@@ -220,6 +234,23 @@ func TestEditorTerminalJobControl(t *testing.T) {
 				if _, err := master.WriteString(s); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if tc.launchFails {
+				select {
+				case <-exited:
+					if waitErr != nil {
+						t.Fatalf("helper: %v", waitErr)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("tower did not return from the failed start")
+				}
+				// The start error is reported and tower is the
+				// foreground job again.
+				result := waitResult(t, filepath.Join(dir, "result"))
+				if !strings.HasPrefix(result, "err=") || strings.HasPrefix(result, "err=<nil>") || !strings.HasSuffix(result, " foreground=true\n") {
+					t.Fatalf("result %q", result)
+				}
+				return
 			}
 			pids = append(pids, readPID(t, pidFile))
 
@@ -369,6 +400,22 @@ func waitGone(t *testing.T, pid int) {
 	for !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
 		if time.Now().After(deadline) {
 			t.Fatalf("process %d survived the shutdown", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// waitResult waits for the helper's result file and returns its content.
+func waitResult(t *testing.T, path string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		data, err := os.ReadFile(path) // #nosec G304 -- test file
+		if err == nil && strings.HasSuffix(string(data), "\n") {
+			return string(data)
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: %q, %v", filepath.Base(path), data, err)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
