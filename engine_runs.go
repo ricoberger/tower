@@ -321,6 +321,7 @@ func (e *engine) schedule() {
 	for _, id := range e.queue.IDs() {
 		if _, ok := e.entryFor(id); !ok {
 			e.queue.Remove(id)
+			delete(e.blocked, id)
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(e.items)) {
