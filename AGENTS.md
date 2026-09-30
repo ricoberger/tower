@@ -27,8 +27,10 @@ Ghostty split).
 
 | Path | Purpose |
 | --- | --- |
-| `main.go` | CLI (`version`, `config init/validate`, `prune`, hidden `--headless`) |
+| `main.go` | CLI (`version`, `config init/validate`, `prune`, `resume`, hidden `--headless`) |
 | `engine.go`, `engine_runs.go` | Engine loop: polls, reconciliation, runner, notifications, API |
+| `tui.go` | Runs the engine with the Bubble Tea TUI and wires the UI to the engine, store and Ghostty |
+| `resume.go` | `tower resume` and the shared Ghostty resume handoff (validation, `resumed-session` recording) |
 | `logging.go` | slog setup (JSON log file + stderr) |
 | `internal/config` | Config loading, `$VAR` interpolation, path resolution, validation, `$GRAFANA_INSTANCES` |
 | `internal/item` | Item store: IDs, `item.yaml`, run directories/artifacts, locking, pruning |
@@ -37,9 +39,12 @@ Ghostty split).
 | `internal/prompt` | `alert.md` rendering; `prompt/prep` — the embedded preparation prompt |
 | `internal/runner` | Priority queue, detached runs, completion, timeout/cancel, recovery |
 | `internal/result` | `result.json` types, schema and validation |
+| `internal/ghostty` | Ghostty handoff through the external `ghostty-new` helper (quoted resume command) |
+| `internal/loginenv` | Captures the interactive login-shell environment (in memory only) for processes started without one |
+| `internal/bounded` | Runs short-lived external commands in their own process group with a time limit and bounded cleanup |
 | `internal/notify` | macOS notifications (terminal-notifier / osascript) |
 | `internal/snapshot` | Read-only snapshot of the engine's applied state and the non-blocking feed from engine to TUI (the engine never imports `internal/ui`) |
-| `internal/ui` | Bubble Tea TUI: renders snapshots, calls the engine API, editor/pager handoff |
+| `internal/ui` | Bubble Tea TUI: renders snapshots (Markdown via glamour, sanitized), calls the engine API, editor handoff |
 | `testdata/fake-copilot.sh` | Fake Copilot CLI for runner tests (controlled by `FAKE_COPILOT_*` env vars) |
 
 ## Commands
