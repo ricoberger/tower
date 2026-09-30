@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -183,6 +184,43 @@ func TestStderrTailBoundary(t *testing.T) {
 	if lines, err := lastLines(strings.NewReader(long.String()), int64(long.Len()), 1, 4); err != nil || !slices.Equal(lines, []string{"last"}) {
 		t.Fatalf("bound applies to the selected lines only: %v %q", err, lines)
 	}
+	// An oversized tail is detected without reading more than the bound
+	// (plus the final byte and one byte before the bound), also for a
+	// single line much larger than the bound; a tail within the bound is
+	// read once.
+	for _, tc := range []struct {
+		name     string
+		data     string
+		maxBytes int64
+		wantErr  bool
+		maxRead  int64
+	}{
+		{"one 8 MiB line", strings.Repeat("x", 8<<20) + "\n", 1 << 20, true, 1<<20 + 2},
+		{"one 8 MiB line without final newline", strings.Repeat("x", 8<<20), 1 << 20, true, 1<<20 + 2},
+		{"tail just over the bound", "a\n" + strings.Repeat("x", 1<<20+1), 1 << 20, true, 1<<20 + 2},
+		{"tail exactly at the bound", "a\n" + strings.Repeat("x", 1<<20), 1 << 20, false, 1<<20 + 2},
+		{"small tail of a large file", strings.Repeat("x\n", 4<<20) + "end\n", 1 << 20, false, scanChunk + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &countingReaderAt{r: strings.NewReader(tc.data)}
+			lines, err := lastLines(r, int64(len(tc.data)), 1, tc.maxBytes)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("error %v, want error %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "larger than") {
+				t.Fatalf("error %v", err)
+			}
+			if err == nil {
+				want := strings.TrimSuffix(tc.data[strings.LastIndexByte(strings.TrimSuffix(tc.data, "\n"), '\n')+1:], "\n")
+				if len(lines) != 1 || lines[0] != want {
+					t.Fatalf("got %d lines", len(lines))
+				}
+			}
+			if r.n > tc.maxRead {
+				t.Fatalf("read %d bytes, want at most %d", r.n, tc.maxRead)
+			}
+		})
+	}
 	for _, tc := range []struct {
 		data string
 		want []string
@@ -229,4 +267,16 @@ func TestFormatting(t *testing.T) {
 	if got := Truncate("日本語テキスト", 5); got != "日本…" {
 		t.Errorf("Truncate=%q", got)
 	}
+}
+
+// countingReaderAt counts the bytes read through it.
+type countingReaderAt struct {
+	r io.ReaderAt
+	n int64
+}
+
+func (c *countingReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	n, err := c.r.ReadAt(p, off)
+	c.n += int64(n)
+	return n, err
 }

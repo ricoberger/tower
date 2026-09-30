@@ -115,7 +115,9 @@ func stderrTail(files RunFiles, id string, run int) ([]string, error) {
 // lastLines returns the last n lines of the first size bytes of r. A final
 // newline terminates the last line and does not start another one. The
 // lines are returned in full; if they are larger than maxBytes together,
-// an error is returned instead of partial lines.
+// an error is returned instead of partial lines. The file is scanned
+// backwards and every byte is read at most once: at most maxBytes+2 bytes
+// are read before an oversized tail is reported.
 func lastLines(r io.ReaderAt, size int64, n int, maxBytes int64) ([]string, error) {
 	if size <= 0 || n <= 0 {
 		return []string{}, nil
@@ -128,18 +130,25 @@ func lastLines(r io.ReaderAt, size int64, n int, maxBytes int64) ([]string, erro
 	if last[0] == '\n' {
 		end--
 	}
-	// first is the start of the earliest selected line; found counts the
-	// line starts seen from the last line backwards.
+	tooLarge := fmt.Errorf("the last %d lines are larger than %d bytes; open the log with l", n, maxBytes)
+	// The scan never goes below limit: a selected tail starting before it
+	// is larger than maxBytes.
+	limit := max(end-maxBytes-1, 0)
+	// chunks holds the scanned bytes from the end backwards; first is the
+	// start of the earliest selected line and found counts the line starts
+	// seen from the last line backwards.
+	var chunks [][]byte
 	first, found := int64(0), 0
-	buf := make([]byte, scanChunk)
 	pos := end
 scan:
-	for pos > 0 {
-		lo := max(pos-scanChunk, 0)
-		chunk := buf[:pos-lo]
+	for pos > limit {
+		lo := max(pos-scanChunk, limit)
+		chunk := make([]byte, pos-lo)
 		if _, err := r.ReadAt(chunk, lo); err != nil && !errors.Is(err, io.EOF) {
 			return nil, err
 		}
+		chunks = append(chunks, chunk)
+		pos = lo
 		for i := len(chunk) - 1; i >= 0; i-- {
 			if chunk[i] == '\n' {
 				found++
@@ -149,16 +158,20 @@ scan:
 				}
 			}
 		}
-		pos = lo
+	}
+	if found < n && pos > 0 {
+		// The scan stopped at the limit without reaching the start of the
+		// earliest selected line.
+		return nil, tooLarge
 	}
 	if end-first > maxBytes {
-		return nil, fmt.Errorf("the last %d lines are larger than %d bytes; open the log with l", n, maxBytes)
+		return nil, tooLarge
 	}
-	data := make([]byte, end-first)
-	if _, err := r.ReadAt(data, first); err != nil && !errors.Is(err, io.EOF) {
-		return nil, err
+	data := make([]byte, 0, end-first)
+	for i := len(chunks) - 1; i >= 0; i-- {
+		data = append(data, chunks[i]...)
 	}
-	return strings.Split(string(data), "\n"), nil
+	return strings.Split(string(data[first-pos:]), "\n"), nil
 }
 
 // loadProgress refreshes the progress line of an executing run. The file is
