@@ -49,12 +49,14 @@ func TestRun(t *testing.T) {
 func TestTimeoutKillsGroup(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	start := time.Now()
-	err := run(t, context.Background(), Options{Timeout: 200 * time.Millisecond, WaitDelay: 100 * time.Millisecond},
+	// The timeout leaves the script time to record its descendant even on a
+	// loaded machine; the descendant runs far longer than the timeout.
+	err := run(t, context.Background(), Options{Timeout: 2 * time.Second, WaitDelay: 100 * time.Millisecond},
 		script(t, "sleep 30 &\necho $! > '"+pidFile+"'\nwait\n"))
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("err %v", err)
 	}
-	if time.Since(start) > 5*time.Second {
+	if time.Since(start) > 10*time.Second {
 		t.Fatal("timeout not enforced")
 	}
 	assertGone(t, pidFile)
