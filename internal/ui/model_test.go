@@ -93,15 +93,14 @@ func (d *driver) run(cmd tea.Cmd) {
 	case tea.QuitMsg:
 		d.quit = true
 	case ExecMsg:
-		d.execs = append(d.execs, msg.Cmd.Args)
+		args := msg.Cmd.Args()
+		d.execs = append(d.execs, args)
 		err := d.execErr
 		if d.runExec {
 			// The fixture's model context is already cancelled (see
 			// newFixture), so a copy without it stands in for the
 			// terminal handoff.
-			c := exec.CommandContext(d.t.Context(), msg.Cmd.Path, msg.Cmd.Args[1:]...) // #nosec G204 -- copy of the model's own command
-			c.Env, c.Dir = msg.Cmd.Env, msg.Cmd.Dir
-			err = c.Run()
+			err = exec.CommandContext(d.t.Context(), args[0], args[1:]...).Run() // #nosec G204 -- copy of the model's own command
 		}
 		d.send(msg.After(err))
 	default:

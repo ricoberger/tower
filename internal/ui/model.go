@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -118,7 +117,7 @@ type HeartbeatMsg time.Time
 // ExecMsg asks the model to hand the terminal to an external command (the
 // editor) and to deliver After's message once it exits.
 type ExecMsg struct {
-	Cmd   *exec.Cmd
+	Cmd   *EditorCommand
 	After func(error) tea.Msg
 }
 
@@ -232,7 +231,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	case ExecMsg:
 		after := msg.After
-		return m, tea.ExecProcess(msg.Cmd, func(err error) tea.Msg { return after(err) })
+		return m, tea.Exec(msg.Cmd, func(err error) tea.Msg { return after(err) })
 	case editorDoneMsg:
 		return m, m.editorDone(msg)
 	case hintMsg:
@@ -650,16 +649,10 @@ func (m *Model) launchResume(id string, run int, session, placement string) tea.
 
 // editorCmd returns the editor invocation with each path as its own
 // argument. The editor runs interactively in the terminal for as long as the
-// user needs; only shutdown (the model's context ending) stops it: the
-// editor and every process it started (an editor wrapper's child) get
-// SIGTERM first and are killed if they have not exited after the stop
-// delay. The invocation stays in tower's process group, so terminal job
-// control is unchanged.
-func (m *Model) editorCmd(paths ...string) *exec.Cmd {
-	cmd := exec.CommandContext(m.ctx, m.opts.Editor, paths...) //nolint:gosec // configured editor executable; paths are arguments
-	cmd.Cancel = func() error { return stopProcessTree(cmd.Process, m.opts.EditorStopDelay) }
-	cmd.WaitDelay = m.opts.EditorStopDelay
-	return cmd
+// user needs; only shutdown (the model's context ending) stops it and
+// everything it started (see EditorCommand).
+func (m *Model) editorCmd(paths ...string) *EditorCommand {
+	return newEditorCommand(m.ctx, m.opts.EditorStopDelay, m.opts.Editor, paths...)
 }
 
 func (m *Model) openReport(id string, run int) tea.Cmd {

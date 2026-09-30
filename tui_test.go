@@ -54,7 +54,6 @@ func (d *tuiDriver) run(ctx context.Context, tm tea.Model) error {
 			}
 			return
 		case ui.ExecMsg:
-			msg.Cmd.Stdin, msg.Cmd.Stdout, msg.Cmd.Stderr = nil, nil, nil
 			deliver(msg.After(msg.Cmd.Run()))
 			return
 		}
