@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"unicode"
 
 	tea "charm.land/bubbletea/v2"
@@ -44,8 +45,9 @@ func withoutMargin(s gansi.StyleConfig) gansi.StyleConfig {
 // MarkdownStyle resolves a glamour style the way GLAMOUR_STYLE is
 // interpreted: empty selects the dark style, a standard style name (for
 // example "light" or "dracula") selects that style, and anything else is
-// read as a JSON style file of at most MaxStyleBytes. The document margin is
-// always removed.
+// read as a JSON style file of at most MaxStyleBytes. The file is opened
+// without blocking, so a FIFO or device is rejected instead of waited on.
+// The document margin is always removed.
 func MarkdownStyle(name string) (gansi.StyleConfig, error) {
 	if name == "" {
 		return markdownStyle, nil
@@ -53,7 +55,7 @@ func MarkdownStyle(name string) (gansi.StyleConfig, error) {
 	if st, ok := styles.DefaultStyles[name]; ok {
 		return withoutMargin(*st), nil
 	}
-	f, err := os.Open(name) // #nosec G304 -- the user's own style file
+	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0) // #nosec G304 -- the user's own style file
 	if err != nil {
 		return gansi.StyleConfig{}, fmt.Errorf("markdown style %q: not a standard style and not readable: %w", name, err)
 	}
@@ -214,12 +216,42 @@ func (m *Model) wantMarkdown() (mdKey, bool) {
 // and the next needed document is started when a render finishes.
 func (m *Model) renderMarkdown() tea.Cmd {
 	key, ok := m.wantMarkdown()
-	if !ok || m.mdPending || (m.md.lines != nil && m.md.key == key) {
+	if !ok || m.mdPending || m.mdRender == nil || (m.md.lines != nil && m.md.key == key) {
 		return nil
 	}
 	m.mdPending = true
-	render := m.opts.RenderMarkdown
+	render := m.mdRender
 	return func() tea.Msg { return markdownMsg{key: key, lines: render(key.src, key.width)} }
+}
+
+// styleMsg delivers the loaded Markdown style.
+type styleMsg struct {
+	style gansi.StyleConfig
+	err   error
+}
+
+// loadStyle loads the Markdown style off the update loop, so a slow or
+// blocking style file never delays the UI or its shutdown.
+func (m *Model) loadStyle() tea.Cmd {
+	if m.mdRender != nil {
+		return nil
+	}
+	name := m.opts.MarkdownStyle
+	return func() tea.Msg {
+		st, err := MarkdownStyle(name)
+		return styleMsg{style: st, err: err}
+	}
+}
+
+// applyStyle starts rendering with the loaded style, or with the default
+// style and an error hint when the style is unusable.
+func (m *Model) applyStyle(msg styleMsg) {
+	if msg.err != nil {
+		m.setHint("GLAMOUR_STYLE ignored: "+msg.err.Error(), true)
+		m.mdRender = RenderMarkdown
+		return
+	}
+	m.mdRender = MarkdownRenderer(msg.style)
 }
 
 // applyMarkdown stores a background rendering if it is still needed.

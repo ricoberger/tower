@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 	"unicode"
 
 	gansi "charm.land/glamour/v2/ansi"
@@ -194,5 +196,30 @@ func TestReferencesInCodeBlocksStayLiteral(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("rendered text lacks %q:\n%s", want, text)
 		}
+	}
+}
+
+func TestMarkdownStyleRejectsFIFO(t *testing.T) {
+	fifo := filepath.Join(t.TempDir(), "style.json")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := MarkdownStyle(fifo)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+			t.Fatalf("err = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		// Release the blocked open before failing.
+		if w, err := os.OpenFile(fifo, os.O_WRONLY, 0); err == nil { // #nosec G304 -- test FIFO
+			_ = w.Close()
+		}
+		<-done
+		t.Fatal("opening the FIFO blocked")
 	}
 }

@@ -289,8 +289,11 @@ like other glamour-based tools: a standard style name (`dark`, the default,
 JSON style file such as a
 [Catppuccin Glamour theme](https://github.com/catppuccin/glamour) (at most
 1 MiB). The document margin of the style is ignored so the preview uses its
-full width. When the style cannot be used, the default style is used and the
-footer says why. A style cannot bypass the sanitization above.
+full width. The style is loaded in the background after the UI starts;
+previews show plain text until then. Only regular files are read as style
+files, and a style with code block colors that cannot be parsed is rejected.
+When the style cannot be used, the default style is used and the footer says
+why. A style cannot bypass the sanitization above.
 
 The latest Copilot message comes from the last 256 KiB of the run's
 `output.jsonl`; the file is only reread when its size or modification time

@@ -1574,9 +1574,34 @@ func TestPagingKeys(t *testing.T) {
 	}
 }
 
-func TestWarningHint(t *testing.T) {
-	f := newFixture(t, func(o *Options) { o.Warning = "GLAMOUR_STYLE ignored: bad" })
-	if f.d.m.Footer() != "GLAMOUR_STYLE ignored: bad" || !f.d.m.footerErr {
+func TestMarkdownStyleLoadsInBackground(t *testing.T) {
+	f := newFixture(t, nil)
+	a := f.add("a", item.StateNeedsYou, "critical", t0, finishedRun(1, item.OutcomeReady, t0))
+	f.writeRunFile(a, 1, item.ReportFile, "# Report\n\n**bold** text\n")
+
+	// A model whose style load is still pending shows plain text and does
+	// not start rendering.
+	f.opts.MarkdownStyle = filepath.Join(t.TempDir(), "missing.json")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f.d = &driver{t: t, m: New(ctx, f.opts), hold: func(msg tea.Msg) bool { _, ok := msg.(styleMsg); return ok }}
+	f.d.run(f.d.m.Init())
+	f.d.send(tea.WindowSizeMsg{Width: 140, Height: 40})
+	f.snapshot()
+	if len(f.d.held) != 1 || f.d.m.mdPending || f.d.m.md.lines != nil {
+		t.Fatalf("held %d pending %v", len(f.d.held), f.d.m.mdPending)
+	}
+	if v := f.view(); !strings.Contains(v, "**bold** text") {
+		t.Fatalf("preview before the style loaded:\n%s", v)
+	}
+	f.d.keys("j", "k")
+
+	// The unusable style falls back to the default with an error hint.
+	f.d.release()
+	if !strings.HasPrefix(f.d.m.Footer(), "GLAMOUR_STYLE ignored: markdown style") || !f.d.m.footerErr {
 		t.Fatalf("footer %q", f.d.m.Footer())
+	}
+	if v := f.view(); f.d.m.md.lines == nil || strings.Contains(v, "**bold**") || !strings.Contains(v, "bold text") {
+		t.Fatalf("preview after the style loaded:\n%s", v)
 	}
 }

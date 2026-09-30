@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -347,26 +348,48 @@ func TestTUIStartupFailures(t *testing.T) {
 
 func TestTUIGlamourStyle(t *testing.T) {
 	rt := newRunTest(t, 1, "")
-	for style, want := range map[string]string{
-		"":                                    "",
-		"light":                               "",
-		filepath.Join(rt.dir, "missing.json"): "GLAMOUR_STYLE ignored: markdown style",
+	fifo := filepath.Join(rt.dir, "style.fifo")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ style, want string }{
+		{"", ""},
+		{"light", ""},
+		{filepath.Join(rt.dir, "missing.json"), "GLAMOUR_STYLE ignored: markdown style"},
+		{fifo, "GLAMOUR_STYLE ignored: markdown style"},
 	} {
 		vars := map[string]string{}
-		if style != "" {
-			vars["GLAMOUR_STYLE"] = style
+		if tc.style != "" {
+			vars["GLAMOUR_STYLE"] = tc.style
 		}
 		e := testEnv(rt.dir, vars, rt.t0)
-		var footer string
-		e.tui = func(_ context.Context, m tea.Model) error {
-			footer = m.(*ui.Model).Footer()
-			return nil
+		d := newTUIDriver(t)
+		e.tui = d.run
+		var stderr syncBuffer
+		exit := make(chan int, 1)
+		go func() {
+			exit <- run(context.Background(), []string{"--config", rt.cfgPath}, &stderr, &stderr, e)
+		}()
+		select {
+		case <-d.running:
+		case code := <-exit:
+			t.Fatalf("%q: tower exited with %d: %s", tc.style, code, stderr.String())
+		case <-time.After(15 * time.Second):
+			t.Fatalf("%q: UI not started", tc.style)
 		}
-		if code, _, stderr := runCLI(t, e, "--config", rt.cfgPath); code != 0 {
-			t.Fatalf("%q: code %d stderr %q", style, code, stderr)
+		if tc.want != "" {
+			d.waitFooter(tc.want)
+		} else if _, footer, _ := d.view(); strings.Contains(footer, "GLAMOUR_STYLE") {
+			t.Errorf("%q: footer %q", tc.style, footer)
 		}
-		if want == "" && strings.Contains(footer, "GLAMOUR_STYLE") || !strings.Contains(footer, want) {
-			t.Errorf("%q: footer %q", style, footer)
+		d.keys("q")
+		select {
+		case code := <-exit:
+			if code != 0 {
+				t.Fatalf("%q: code %d stderr %q", tc.style, code, stderr.String())
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("%q: tower did not exit", tc.style)
 		}
 	}
 }

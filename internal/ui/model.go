@@ -84,12 +84,15 @@ type Options struct {
 	Heartbeat time.Duration
 	// EditorStopDelay overrides EditorStopDelay (tests).
 	EditorStopDelay time.Duration
+	// MarkdownStyle is the glamour style of the preview (GLAMOUR_STYLE; see
+	// MarkdownStyle). It is loaded in the background when the UI starts;
+	// until then documents are shown as plain text, and an unusable style
+	// falls back to the default with an error hint. Ignored when
+	// RenderMarkdown is set.
+	MarkdownStyle string
 	// RenderMarkdown renders a Markdown document for a width in the
-	// background (nil: RenderMarkdown with the default style).
+	// background (tests; nil: rendering with MarkdownStyle).
 	RenderMarkdown func(src string, width int) []string
-	// Warning is shown as an error hint when the UI starts (for example an
-	// unusable GLAMOUR_STYLE).
-	Warning string
 }
 
 type focusArea int
@@ -202,6 +205,8 @@ type Model struct {
 	md        mdCache
 	mdPending bool
 	mdPlain   mdCache
+	// mdRender renders Markdown; it is nil until the style is loaded.
+	mdRender func(src string, width int) []string
 }
 
 // New returns the model. ctx bounds all background requests.
@@ -215,13 +220,7 @@ func New(ctx context.Context, opts Options) *Model {
 	if opts.EditorStopDelay <= 0 {
 		opts.EditorStopDelay = EditorStopDelay
 	}
-	if opts.RenderMarkdown == nil {
-		opts.RenderMarkdown = RenderMarkdown
-	}
-	m := &Model{ctx: ctx, opts: opts, now: opts.Now()}
-	if opts.Warning != "" {
-		m.setHint(opts.Warning, true)
-	}
+	m := &Model{ctx: ctx, opts: opts, now: opts.Now(), mdRender: opts.RenderMarkdown}
 	if s, ok := opts.Feed.Latest(); ok {
 		m.applySnapshot(s)
 	}
@@ -230,7 +229,7 @@ func New(ctx context.Context, opts Options) *Model {
 
 // Init starts the snapshot subscription and the heartbeat.
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(waitFeed(m.ctx, m.opts.Feed), m.tick(), m.loadPreview())
+	return tea.Batch(waitFeed(m.ctx, m.opts.Feed), m.tick(), m.loadPreview(), m.loadStyle())
 }
 
 func (m *Model) tick() tea.Cmd {
@@ -257,6 +256,9 @@ func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case markdownMsg:
 		m.applyMarkdown(msg)
+		return m, nil
+	case styleMsg:
+		m.applyStyle(msg)
 		return m, nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
