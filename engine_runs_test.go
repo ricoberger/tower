@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -576,6 +577,55 @@ func TestRunInterruptionRetry(t *testing.T) {
 		t.Fatal("a third attempt was made")
 	}
 	noDelivery(t, h4)
+}
+
+// A run finalized before tower stopped, while its process group was still
+// being cleaned up, keeps its slot after the restart until the cleanup
+// completes; it is neither re-completed nor re-notified.
+func TestRunRestartDuringCleanup(t *testing.T) {
+	rt := newRunTest(t, 1, "")
+	rt.setAlerts(rt.alert("aaa", "critical", 3*time.Hour), rt.alert("bbb", "critical", 2*time.Hour))
+	sid := "2f3d2c4b-1a2b-4c3d-8e9f-0123456789ab"
+	pid, _ := ownedProcess(t, sid)
+	finished := runningRun(1, pid, sid, item.ReasonAuto, rt.t0.Add(-time.Hour))
+	finished.Outcome, finished.FinishedAt = item.OutcomeReady, &rt.t0
+	rt.seed("aaa", item.StateNeedsYou, 1, nil, finished)
+
+	// TERM is swallowed so the cleanup stays pending until KILL.
+	var terms atomic.Int32
+	h := rt.start(func(o *engineOptions) {
+		o.runner.Signal = func(pid int, sig syscall.Signal) error {
+			if sig == syscall.SIGTERM {
+				terms.Add(1)
+				return nil
+			}
+			return syscall.Kill(pid, sig)
+		}
+	})
+	eventually(t, "cleanup TERM", func() bool { return terms.Load() > 0 })
+	for range 3 {
+		h.wait(h.monitored, "monitor pass")
+	}
+	if s := rt.state("bbb"); s != item.StateQueued || len(rt.starts()) != 0 {
+		t.Fatalf("bbb started in the cleaning slot: state=%s starts=%v", s, rt.starts())
+	}
+	if !pidAlive(pid) {
+		t.Fatal("cleanup finished early")
+	}
+
+	// KILL after the grace empties the group; the slot is released.
+	rt.clock.add(time.Second)
+	eventually(t, "group killed", func() bool { return syscall.Kill(-pid, 0) != nil })
+	rt.waitState("bbb", item.StatePreparing)
+	if n := waitDelivery(t, h); n.ItemID != id("bbb") {
+		t.Fatalf("notification = %+v", n)
+	}
+	if it, r := rt.item("aaa"), rt.run("aaa", 1); it.State != item.StateNeedsYou || r.Outcome != item.OutcomeReady {
+		t.Fatalf("aaa = %s run = %+v", it.State, r)
+	}
+	if !strings.Contains(h.stderr.String(), "needs cleanup") {
+		t.Fatalf("logs:\n%s", h.stderr.String())
+	}
 }
 
 // A live unrelated process with the stored PID is neither re-attached nor

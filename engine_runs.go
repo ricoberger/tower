@@ -227,6 +227,19 @@ func (e *engine) recoverRuns() {
 			}
 		}
 	}
+	// Finished runs whose process group cleanup was pending when tower
+	// stopped keep occupying a slot until their cleanup completes.
+	for _, id := range slices.Sorted(maps.Keys(e.items)) {
+		c := e.items[id]
+		runs := slices.Clone(c.loaded.Runs)
+		slices.SortFunc(runs, func(a, b item.Run) int { return b.Number - a.Number })
+		for _, run := range runs {
+			if e.runner.Tracking(id) {
+				break
+			}
+			e.runner.RecoverCleanup(id, c.loaded.Item.Source.Name, run)
+		}
+	}
 	if len(events) > 0 {
 		_, _, _ = e.reconcileWith(events)
 	}

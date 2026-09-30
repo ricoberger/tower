@@ -403,6 +403,36 @@ func (r *Runner) Recover(itemID, source string, run item.Run) (adopted bool, int
 	return false, out
 }
 
+// RecoverCleanup checks a persisted run that is no longer running (its
+// outcome was recorded before its process group was cleaned up, e.g.
+// because tower stopped during cleanup) on startup. If its wrapper PID is
+// alive and verifiably belongs to its session, the run is tracked as
+// completed with pending group cleanup: it occupies a slot until the group
+// is empty or ownership is lost, and no completion is reported again. If
+// the wrapper is gone while members of its group remain, their ownership
+// cannot be verified: cleanup is skipped and logged. It reports whether
+// the run was tracked.
+func (r *Runner) RecoverCleanup(itemID, source string, run item.Run) bool {
+	if run.Outcome == item.OutcomeRunning || run.PID <= 0 || r.Tracking(itemID) {
+		return false
+	}
+	log := r.opts.Log.With("item_id", itemID, "run", run.Number, "source", source)
+	if !alive(r.opts.Signal, run.PID) {
+		if alive(r.opts.Signal, -run.PID) {
+			log.Info("skipping process group cleanup of a finished run: its wrapper exited and the remaining processes cannot be verified as this run",
+				"pid", run.PID)
+		}
+		return false
+	}
+	if run.SessionID == "" || !r.opts.Owns(run.PID, run.SessionID) {
+		return false // PID reuse: not this run's process
+	}
+	r.runs[itemID] = &tracked{itemID: itemID, source: source, run: run.Clone(), since: r.now(), completed: true}
+	log.Info("re-attached a finished run whose process group still needs cleanup", "pid", run.PID,
+		"outcome", string(run.Outcome))
+	return true
+}
+
 // Cancel terminates the executing run n of an item (lifecycle or user
 // cancellation). Its completion is reported by a later Check or HandleWait.
 func (r *Runner) Cancel(itemID string, n int) {

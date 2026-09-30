@@ -976,6 +976,90 @@ func TestReattachedCleanupWithOwnership(t *testing.T) {
 	}
 }
 
+// A run finalized before tower stopped whose process group was still being
+// cleaned up keeps its slot after a restart until the cleanup completes.
+func TestRecoverCleanup(t *testing.T) {
+	t.Run("owned", func(t *testing.T) {
+		e := newEnv(t)
+		t.Setenv("FAKE_COPILOT_MODE", "hang")
+		it := e.item(t, "abc", 1)
+		run := startDetached(t, e, it)
+		run.Outcome = item.OutcomeReady
+		owns, sigs := &ownsRecorder{}, &signalRecorder{}
+		r := e.runner(t, func(o *Options) { o.Owns, o.Signal = owns.owns, sigs.signal })
+		if !r.RecoverCleanup(it.ID, "dev", run) {
+			t.Fatal("not tracked")
+		}
+		if r.Busy() != 1 || r.Executing(it.ID) || !r.Tracking(it.ID) {
+			t.Fatalf("busy=%d executing=%v", r.Busy(), r.Executing(it.ID))
+		}
+		// A second recovery of the same item is a no-op.
+		if r.RecoverCleanup(it.ID, "dev", run) {
+			t.Fatal("tracked twice")
+		}
+		c := drive(t, r, false, r.idle)
+		if len(c) != 0 {
+			t.Fatalf("completion reported again: %+v", c)
+		}
+		if got := sigs.list(); len(got) == 0 || got[0] != syscall.SIGTERM {
+			t.Errorf("signals = %v", got)
+		}
+		if alive(syscall.Kill, -run.PID) {
+			t.Error("group survived")
+		}
+		if !strings.Contains(e.logs.String(), "needs cleanup") {
+			t.Errorf("logs:\n%s", e.logs.String())
+		}
+	})
+	t.Run("not owned", func(t *testing.T) {
+		e := newEnv(t)
+		t.Setenv("FAKE_COPILOT_MODE", "hang")
+		it := e.item(t, "abc", 1)
+		run := startDetached(t, e, it)
+		run.Outcome = item.OutcomeFailed
+		owns, sigs := &ownsRecorder{}, &signalRecorder{}
+		owns.foreign.Store(true)
+		r := e.runner(t, func(o *Options) { o.Owns, o.Signal = owns.owns, sigs.signal })
+		if r.RecoverCleanup(it.ID, "dev", run) || r.Busy() != 0 {
+			t.Fatal("unverified process tracked")
+		}
+		r.Check()
+		if got := sigs.list(); len(got) != 0 {
+			t.Errorf("signals = %v", got)
+		}
+		if !alive(syscall.Kill, run.PID) {
+			t.Error("unverified process was affected")
+		}
+	})
+	t.Run("wrapper gone", func(t *testing.T) {
+		e := newEnv(t)
+		t.Setenv("FAKE_COPILOT_MODE", "hang")
+		t.Setenv("FAKE_COPILOT_DESCENDANT", "1")
+		it := e.item(t, "abc", 1)
+		run := startDetached(t, e, it)
+		e.waitFile(t, it.ID, 1, "fake-descendant")
+		if err := syscall.Kill(run.PID, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		waitDead(t, run.PID)
+		run.Outcome = item.OutcomeReady
+		sigs := &signalRecorder{}
+		r := e.runner(t, func(o *Options) { o.Signal = sigs.signal })
+		if r.RecoverCleanup(it.ID, "dev", run) || r.Busy() != 0 {
+			t.Fatal("unverifiable group tracked")
+		}
+		if got := sigs.list(); len(got) != 0 {
+			t.Errorf("signals = %v", got)
+		}
+		if !alive(syscall.Kill, -run.PID) {
+			t.Fatal("fixture group already gone")
+		}
+		if !strings.Contains(e.logs.String(), "skipping process group cleanup") {
+			t.Errorf("logs:\n%s", e.logs.String())
+		}
+	})
+}
+
 func TestStartFailures(t *testing.T) {
 	e := newEnv(t)
 	it := e.item(t, "abc", 1)
