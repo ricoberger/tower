@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
+	"os"
 	"strings"
 	"time"
 	"unicode"
@@ -18,10 +21,13 @@ const (
 	// of output.jsonl for the progress line. The file is only read again
 	// when its size or modification time changed.
 	ProgressTailBytes = 256 << 10
-	// stderrTailBytes bounds the stderr.log read of a failed run.
-	stderrTailBytes = 256 << 10
 	// StderrLines is the number of stderr.log lines shown for a failed run.
 	StderrLines = 20
+	// StderrLineBytes bounds how much of each shown stderr.log line is
+	// read; longer lines are shown truncated with a marker.
+	StderrLineBytes = 4 << 10
+	// scanChunk is the block size of the backward line scan.
+	scanChunk = 64 << 10
 )
 
 // RunFiles reads run artifacts through the store's safe accessors.
@@ -29,6 +35,7 @@ type RunFiles interface {
 	ReadRunFile(id string, n int, name string) ([]byte, error)
 	StatRunFile(id string, n int, name string) (fs.FileInfo, error)
 	ReadRunFileTail(id string, n int, name string, limit int64) ([]byte, int64, fs.FileInfo, error)
+	OpenRunFile(id string, n int, name string) (*os.File, error)
 }
 
 // previewKey identifies the artifacts a preview was loaded for.
@@ -88,28 +95,76 @@ func loadArtifacts(files RunFiles, key previewKey) artifacts {
 	return a
 }
 
-// stderrTail returns the last StderrLines complete or trailing lines of
-// stderr.log.
+// stderrTail returns the last StderrLines lines of stderr.log, including
+// blank lines. The file is scanned backwards, so the lines are exact however
+// long they are, while at most StderrLineBytes of each line are kept.
 func stderrTail(files RunFiles, id string, run int) ([]string, error) {
-	data, off, _, err := files.ReadRunFileTail(id, run, item.StderrFile, stderrTailBytes)
+	f, err := files.OpenRunFile(id, run, item.StderrFile)
 	if err != nil {
 		return nil, err
 	}
-	if off > 0 {
-		// The first line may be cut at the tail boundary.
-		if i := bytes.IndexByte(data, '\n'); i >= 0 {
-			data = data[i+1:]
-		} else {
-			data = nil
-		}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
 	}
-	text := strings.TrimRight(string(data), "\n")
-	if text == "" {
+	return lastLines(f, fi.Size(), StderrLines, StderrLineBytes)
+}
+
+// lastLines returns the last n lines of the first size bytes of r. A final
+// newline terminates the last line and does not start another one. Lines
+// longer than maxLine bytes are truncated and marked.
+func lastLines(r io.ReaderAt, size int64, n, maxLine int) ([]string, error) {
+	if size <= 0 || n <= 0 {
 		return []string{}, nil
 	}
-	lines := strings.Split(text, "\n")
-	if len(lines) > StderrLines {
-		lines = lines[len(lines)-StderrLines:]
+	end := size
+	last := make([]byte, 1)
+	if _, err := r.ReadAt(last, size-1); err != nil {
+		return nil, err
+	}
+	if last[0] == '\n' {
+		end--
+	}
+	// starts collects line start offsets from the last line backwards.
+	starts := []int64{}
+	buf := make([]byte, scanChunk)
+	pos := end
+scan:
+	for pos > 0 {
+		lo := max(pos-scanChunk, 0)
+		chunk := buf[:pos-lo]
+		if _, err := r.ReadAt(chunk, lo); err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		for i := len(chunk) - 1; i >= 0; i-- {
+			if chunk[i] == '\n' {
+				starts = append(starts, lo+int64(i)+1)
+				if len(starts) == n {
+					break scan
+				}
+			}
+		}
+		pos = lo
+	}
+	if len(starts) < n {
+		starts = append(starts, 0)
+	}
+	lines := make([]string, len(starts))
+	stop := end
+	for i, start := range starts {
+		length := stop - start
+		keep := min(length, int64(maxLine))
+		b := make([]byte, keep)
+		if _, err := r.ReadAt(b, start); err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+		line := string(b)
+		if length > keep {
+			line += fmt.Sprintf(" … (%d more bytes)", length-keep)
+		}
+		lines[len(starts)-1-i] = line
+		stop = start - 1
 	}
 	return lines, nil
 }

@@ -1,9 +1,11 @@
 package ui
 
 import (
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -142,16 +144,59 @@ func TestStderrTailBoundary(t *testing.T) {
 	if err != nil || len(lines) != 20 || lines[0] != "line a" || lines[19] != "line t" {
 		t.Fatalf("%v %q", err, lines)
 	}
-	// Longer than the byte limit: the cut first line is dropped.
-	long := strings.Repeat("y", stderrTailBytes) + "\nlast\n"
-	f.writeRunFile(id, 1, item.StderrFile, long)
+	// Trailing blank lines are lines too: a diagnostic followed by 20 blank
+	// lines is no longer shown.
+	f.writeRunFile(id, 1, item.StderrFile, "old diagnostic\n"+strings.Repeat("\n", 20))
 	lines, err = stderrTail(f.store, id, 1)
-	if err != nil || len(lines) != 1 || lines[0] != "last" {
-		t.Fatalf("%v %d lines", err, len(lines))
+	if err != nil || len(lines) != 20 || strings.Join(lines, "") != "" {
+		t.Fatalf("blank lines: %v %q", err, lines)
 	}
-	f.writeRunFile(id, 1, item.StderrFile, "")
-	if lines, err := stderrTail(f.store, id, 1); err != nil || len(lines) != 0 {
-		t.Fatalf("empty: %v %q", err, lines)
+	f.writeRunFile(id, 1, item.StderrFile, "old diagnostic\n"+strings.Repeat("\n", 19))
+	lines, err = stderrTail(f.store, id, 1)
+	if err != nil || len(lines) != 20 || lines[0] != "old diagnostic" {
+		t.Fatalf("19 blank lines: %v %q", err, lines)
+	}
+	// Lines far beyond any fixed byte window still count as lines; long
+	// ones are truncated with a marker instead of disappearing.
+	huge := strings.Repeat("y", 300<<10)
+	var long strings.Builder
+	long.WriteString("before\n")
+	for i := range 18 {
+		fmt.Fprintf(&long, "%s%02d\n", huge, i)
+	}
+	long.WriteString("last")
+	f.writeRunFile(id, 1, item.StderrFile, long.String())
+	lines, err = stderrTail(f.store, id, 1)
+	if err != nil || len(lines) != 20 || lines[0] != "before" || lines[19] != "last" {
+		t.Fatalf("long lines: %v %d lines", err, len(lines))
+	}
+	marker := fmt.Sprintf(" … (%d more bytes)", len(huge)+2-StderrLineBytes)
+	if lines[1] != strings.Repeat("y", StderrLineBytes)+marker {
+		t.Fatalf("long line not truncated with a marker: %q", lines[1][StderrLineBytes-5:])
+	}
+	for _, tc := range []struct {
+		data string
+		want []string
+	}{
+		{"", []string{}},
+		{"\n", []string{""}},
+		{"a", []string{"a"}},
+		{"a\n\nb", []string{"a", "", "b"}},
+		{"a\r\n", []string{"a\r"}},
+	} {
+		f.writeRunFile(id, 1, item.StderrFile, tc.data)
+		if lines, err := stderrTail(f.store, id, 1); err != nil || !slices.Equal(lines, tc.want) {
+			t.Errorf("%q: %v %q", tc.data, err, lines)
+		}
+	}
+	// Lines spanning scan chunk boundaries.
+	var chunked strings.Builder
+	for i := range 40 {
+		fmt.Fprintf(&chunked, "%d:%s\n", i, strings.Repeat("z", scanChunk/3+i))
+	}
+	lines, err = lastLines(strings.NewReader(chunked.String()), int64(chunked.Len()), 25, scanChunk)
+	if err != nil || len(lines) != 25 || !strings.HasPrefix(lines[0], "15:") || !strings.HasPrefix(lines[24], "39:") || len(lines[24]) != len("39:")+scanChunk/3+39 {
+		t.Fatalf("chunked: %v %d", err, len(lines))
 	}
 }
 
