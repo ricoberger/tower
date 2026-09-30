@@ -1416,3 +1416,24 @@ func TestQuitWhileMarkdownRenderBlocks(t *testing.T) {
 		t.Fatal("quit waited for the blocked render")
 	}
 }
+
+func TestHostileAlertMarkdownOnScreen(t *testing.T) {
+	f := newFixture(t, nil)
+	a := f.add("a", item.StateNew, "critical", t0)
+	doc := "# Alert\n\nlink &#27;]8;;https://example.com&#27;]52;c;aGk=&#7; end [ok](https://ok.example)\n"
+	if err := f.store.WriteAlertMarkdown(a, []byte(doc)); err != nil {
+		t.Fatal(err)
+	}
+	f.snapshot()
+	if key, ok := f.d.m.wantMarkdown(); !ok || f.d.m.md.key != key {
+		t.Fatal("alert.md not rendered")
+	}
+	screen := f.d.m.Render()
+	if !strings.Contains(ansi.Strip(screen), "end ok") {
+		t.Fatalf("rendered alert missing:\n%s", ansi.Strip(screen))
+	}
+	if strings.Contains(screen, "\x1b]8;;https://example.com") || strings.Contains(screen, "\x1b]52") {
+		t.Fatalf("hostile sequence reached the screen: %q", screen)
+	}
+	assertOnlySafeSequences(t, screen)
+}

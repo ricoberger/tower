@@ -2,6 +2,7 @@ package ui
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode"
 
@@ -26,6 +27,25 @@ var markdownStyle = func() gansi.StyleConfig {
 	s.Document.Margin = &zero
 	return s
 }()
+
+// controlReferences matches numeric character references, which Markdown
+// decodes into characters after the input was sanitized.
+var controlReferences = regexp.MustCompile(`&#(?:[0-9]{1,8}|[xX][0-9a-fA-F]{1,7});`)
+
+// neutralizeReference replaces a numeric character reference to a control
+// character with U+FFFD and keeps every other reference.
+func neutralizeReference(ref string) string {
+	num := strings.TrimSuffix(strings.TrimPrefix(ref, "&#"), ";")
+	base := 10
+	if num[0] == 'x' || num[0] == 'X' {
+		num, base = num[1:], 16
+	}
+	n, err := strconv.ParseUint(num, base, 32)
+	if err != nil || n > unicode.MaxRune || unicode.IsControl(rune(n)) {
+		return "\uFFFD"
+	}
+	return ref
+}
 
 // trailingPadding matches trailing spaces and SGR sequences of a line.
 var trailingPadding = regexp.MustCompile(`(?:\x1b\[[0-9;:]*m| )+$`)
@@ -122,6 +142,7 @@ func plainLines(s string) []string {
 func RenderMarkdown(src string, width int) []string {
 	src = Sanitize(src)
 	plain := func() []string { return plainLines(src) }
+	src = controlReferences.ReplaceAllStringFunc(src, neutralizeReference)
 	if len(src) > MaxRenderBytes || width < 1 {
 		return plain()
 	}
@@ -205,9 +226,18 @@ func isSGR(body string) bool {
 	return true
 }
 
-// safeOSC reports whether the OSC 8 body (after "ESC ] 8 ;") contains no
-// control characters other than its terminator.
+// safeOSC reports whether the OSC 8 body (after "ESC ] 8 ;") is a complete
+// hyperlink sequence: parameters, ";", a URI and a BEL or ST terminator,
+// with no other control characters. Unterminated or aborted fragments are
+// rejected.
 func safeOSC(body string) bool {
-	body = strings.TrimSuffix(strings.TrimSuffix(body, "\x07"), "\x1b\\")
-	return !strings.ContainsFunc(body, unicode.IsControl)
+	switch {
+	case strings.HasSuffix(body, "\x07"):
+		body = strings.TrimSuffix(body, "\x07")
+	case strings.HasSuffix(body, "\x1b\\"):
+		body = strings.TrimSuffix(body, "\x1b\\")
+	default:
+		return false
+	}
+	return strings.Contains(body, ";") && !strings.ContainsFunc(body, unicode.IsControl)
 }

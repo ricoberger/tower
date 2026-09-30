@@ -11,7 +11,7 @@ import (
 
 // allowedSequences matches the sequences rendered Markdown may contain: SGR
 // styling and OSC 8 hyperlinks.
-var allowedSequences = regexp.MustCompile("\x1b\\[[0-9;:]*m|\x1b\\]8;[^\x07\x1b]*(\x07|\x1b\\\\)")
+var allowedSequences = regexp.MustCompile("\x1b\\[[0-9;:]*m|\x1b\\]8;[^;\x07\x1b]*;[^\x07\x1b]*(\x07|\x1b\\\\)")
 
 // assertOnlySafeSequences fails when s contains a control character outside
 // the allowed sequences (newlines excepted).
@@ -31,6 +31,26 @@ func TestSanitizeRendered(t *testing.T) {
 		t.Fatalf("sanitizeRendered = %q, want %q", got, want)
 	}
 	assertOnlySafeSequences(t, got)
+
+	// Hyperlinks must be complete and terminated; aborted or unterminated
+	// fragments are dropped.
+	for _, in := range []string{
+		"a\x1b]8;;https://example.com\x1b]52;c;aGk=\x07b",
+		"a\x1b]8;;https://example.comb",
+		"a\x1b]8;https://example.com\x07b",
+		"a\x1b]8;;https://example.com\x1bb",
+	} {
+		got := sanitizeRendered(in)
+		if strings.Contains(got, "\x1b]8") || !strings.HasPrefix(got, "a") {
+			t.Errorf("sanitizeRendered(%q) = %q", in, got)
+		}
+		assertOnlySafeSequences(t, got)
+	}
+	for _, in := range []string{"\x1b]8;;http://e\x07", "\x1b]8;id=1;http://e\x1b\\", "\x1b]8;;\x1b\\"} {
+		if got := sanitizeRendered(in); got != in {
+			t.Errorf("sanitizeRendered(%q) = %q, want it kept", in, got)
+		}
+	}
 }
 
 func TestRenderMarkdown(t *testing.T) {
@@ -66,6 +86,19 @@ func TestRenderMarkdown(t *testing.T) {
 	assertOnlySafeSequences(t, out)
 	if strings.Contains(out, "\x1b[2J") || strings.Contains(out, "\x1b]52") || strings.Contains(out, "\x1b]0;") {
 		t.Fatalf("unsafe sequence survived: %q", out)
+	}
+
+	// A character-reference hyperlink opener cut short by another sequence
+	// does not survive rendering.
+	for _, src := range []string{
+		"x &#27;]8;;https://example.com&#27;]52;c;aGk=&#7; y\n",
+		"x &#x1B;]8;;https://example.com y\n",
+	} {
+		out := strings.Join(RenderMarkdown(src, 60), "\n")
+		assertOnlySafeSequences(t, out)
+		if strings.Contains(out, "\x1b]8;;https://example.com") {
+			t.Fatalf("unterminated hyperlink survived: %q", out)
+		}
 	}
 
 	// Oversized documents are shown as sanitized plain text.
