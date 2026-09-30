@@ -95,13 +95,16 @@ func waitGone(t *testing.T, logDir, name string) {
 	t.Fatalf("descendant %d survived the delivery", pid)
 }
 
+// newNotifier returns a notifier for the fake executables. Its timeout is
+// generous so successful deliveries do not fail on a loaded machine; tests
+// of the deadline shorten it.
 func newNotifier(exe, config string) *Notifier {
 	return &Notifier{
 		Sound:      "default",
 		ConfigPath: config,
 		Executable: func() (string, error) { return exe, nil },
 		LookPath:   exec.LookPath,
-		Timeout:    300 * time.Millisecond,
+		Timeout:    10 * time.Second,
 		WaitDelay:  100 * time.Millisecond,
 	}
 }
@@ -322,6 +325,7 @@ func TestDeliveryDeadline(t *testing.T) {
 			logDir := fakeBin(t, name)
 			t.Setenv("FAKE_NOTIFY_MODE", "hang")
 			n := newNotifier("/bin/tower", "/c.yaml")
+			n.Timeout = 300 * time.Millisecond
 			start := time.Now()
 			err := n.Deliver(context.Background(), x)
 			elapsed := time.Since(start)
@@ -338,7 +342,6 @@ func TestDeliveryDeadline(t *testing.T) {
 		logDir := fakeBin(t, "terminal-notifier")
 		t.Setenv("FAKE_NOTIFY_MODE", "pipe")
 		n := newNotifier("/bin/tower", "/c.yaml")
-		n.Timeout = 5 * time.Second
 		start := time.Now()
 		if err := n.Deliver(context.Background(), x); err != nil {
 			t.Fatalf("err = %v", err)
