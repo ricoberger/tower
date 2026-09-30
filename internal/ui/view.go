@@ -32,8 +32,7 @@ func (m *Model) Render() string {
 	if bodyH < 4 {
 		return strings.Join([]string{header, footer}[:min(m.height, 2)], "\n")
 	}
-	listW := max(min(m.width*2/5, 60), min(m.width, 24))
-	previewW := m.width - listW
+	listW, previewW := m.columnWidths()
 	list := Frame(listW, bodyH, FrameState{Title: "Items", Status: m.listStatus()}, m.focus == focusList, m.listContent(listW, bodyH))
 	var right string
 	if previewW >= 4 {
@@ -50,6 +49,24 @@ func (m *Model) Render() string {
 		body = lipgloss.JoinHorizontal(lipgloss.Top, list, right)
 	}
 	return header + "\n" + body + "\n" + footer
+}
+
+// columnWidths returns the widths of the list and the preview frames.
+func (m *Model) columnWidths() (int, int) {
+	listW := max(min(m.width*2/5, 60), min(m.width, 24))
+	return listW, m.width - listW
+}
+
+// previewContentWidth returns the width of the preview content, or 0 when
+// the preview is not shown.
+func (m *Model) previewContentWidth() int {
+	bodyH := m.height - 2
+	_, previewW := m.columnWidths()
+	if m.width <= 0 || bodyH < 4 || previewW < 4 {
+		return 0
+	}
+	w, _ := FrameContentSize(previewW, bodyH)
+	return w
 }
 
 // headerText renders source health and the run counters.

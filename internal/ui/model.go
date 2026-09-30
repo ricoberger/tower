@@ -84,6 +84,9 @@ type Options struct {
 	Heartbeat time.Duration
 	// EditorStopDelay overrides EditorStopDelay (tests).
 	EditorStopDelay time.Duration
+	// RenderMarkdown renders a Markdown document for a width in the
+	// background (nil: RenderMarkdown; tests).
+	RenderMarkdown func(src string, width int) []string
 }
 
 type focusArea int
@@ -190,8 +193,12 @@ type Model struct {
 	// alertLoading is set while an alert.md read is in flight.
 	alert        alertDoc
 	alertLoading bool
-	// md caches the rendered Markdown of the preview.
-	md mdCache
+	// md is the latest rendered Markdown document of the preview;
+	// mdPending is set while a render is in flight. mdPlain holds the plain
+	// text shown until the rendering is available.
+	md        mdCache
+	mdPending bool
+	mdPlain   mdCache
 }
 
 // New returns the model. ctx bounds all background requests.
@@ -204,6 +211,9 @@ func New(ctx context.Context, opts Options) *Model {
 	}
 	if opts.EditorStopDelay <= 0 {
 		opts.EditorStopDelay = EditorStopDelay
+	}
+	if opts.RenderMarkdown == nil {
+		opts.RenderMarkdown = RenderMarkdown
 	}
 	m := &Model{ctx: ctx, opts: opts, now: opts.Now()}
 	if s, ok := opts.Feed.Latest(); ok {
@@ -230,9 +240,18 @@ func (m *Model) SelectedID() string { return m.selected }
 // Footer returns the current footer message.
 func (m *Model) Footer() string { return m.footer }
 
-// Update handles a message.
+// Update handles a message and starts rendering the preview's Markdown
+// document when it changed.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	_, cmd := m.update(msg)
+	return m, tea.Batch(cmd, m.renderMarkdown())
+}
+
+func (m *Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case markdownMsg:
+		m.applyMarkdown(msg)
+		return m, nil
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,6 +73,21 @@ type driver struct {
 	execErr error
 	// runExec executes ExecMsg commands instead of only recording them.
 	runExec bool
+	// hold, when set, keeps matching command results in held instead of
+	// delivering them, to simulate slow background work.
+	hold func(tea.Msg) bool
+	held []tea.Msg
+}
+
+// release delivers the oldest held message.
+func (d *driver) release() {
+	d.t.Helper()
+	if len(d.held) == 0 {
+		d.t.Fatal("no held message")
+	}
+	msg := d.held[0]
+	d.held = d.held[1:]
+	d.send(msg)
 }
 
 func (d *driver) send(msg tea.Msg) {
@@ -85,7 +101,12 @@ func (d *driver) run(cmd tea.Cmd) {
 	if cmd == nil {
 		return
 	}
-	switch msg := cmd().(type) {
+	msg := cmd()
+	if d.hold != nil && d.hold(msg) {
+		d.held = append(d.held, msg)
+		return
+	}
+	switch msg := msg.(type) {
 	case nil:
 	case tea.BatchMsg:
 		for _, c := range msg {
@@ -244,6 +265,11 @@ func (f *fixture) add(fp string, state item.State, severity string, startsAt tim
 // snapshot sends the current fixture items to the model.
 func (f *fixture) snapshot() {
 	f.t.Helper()
+	f.d.send(SnapshotMsg(f.snap()))
+}
+
+// snap builds the snapshot of the fixture's items and runs.
+func (f *fixture) snap() snapshot.Snapshot {
 	var s snapshot.Snapshot
 	ids := make([]string, 0, len(f.items))
 	for id := range f.items {
@@ -260,7 +286,7 @@ func (f *fixture) snapshot() {
 	}
 	s.Sources = []snapshot.SourceHealth{{Name: "dev", LastSuccess: f.now.Add(-5 * time.Second)}}
 	s.Concurrency = 2
-	f.d.send(SnapshotMsg(s))
+	return s
 }
 
 func (f *fixture) disk(id string) *item.Item {
@@ -800,8 +826,8 @@ func TestPreparedPreview(t *testing.T) {
 	if !strings.Contains(f.view(), end) {
 		t.Fatal("scrolling after a resize")
 	}
-	if w, _ := FrameContentSize(60-24, 18); f.d.m.md.width != w {
-		t.Fatalf("report rendered for width %d, want %d", f.d.m.md.width, w)
+	if w, _ := FrameContentSize(60-24, 18); f.d.m.md.key.width != w {
+		t.Fatalf("report rendered for width %d, want %d", f.d.m.md.key.width, w)
 	}
 	f.d.send(tea.WindowSizeMsg{Width: 200, Height: 60})
 	if v := f.view(); !strings.Contains(v, end) || !strings.Contains(v, "END OF REPORT") || !strings.Contains(v, "line of the report") {
@@ -1290,5 +1316,103 @@ func TestMarkdownRenderedOnlyWhenInputsChange(t *testing.T) {
 	_ = f.d.m.Render()
 	if &f.d.m.md.lines[0] == &first[0] {
 		t.Fatal("report not rendered again after a resize")
+	}
+}
+
+// fakeRenderer records the documents it renders and marks its output.
+type fakeRenderer struct{ calls []mdKey }
+
+func (r *fakeRenderer) render(src string, width int) []string {
+	r.calls = append(r.calls, mdKey{src: src, width: width})
+	return []string{fmt.Sprintf("RENDERED@%d", width)}
+}
+
+func TestMarkdownRendersInBackground(t *testing.T) {
+	r := &fakeRenderer{}
+	f := newFixture(t, func(o *Options) { o.RenderMarkdown = r.render })
+	f.d.hold = func(msg tea.Msg) bool { _, ok := msg.(markdownMsg); return ok }
+	a := f.add("a", item.StateNeedsYou, "critical", t0.Add(-time.Minute), finishedRun(1, item.OutcomeReady, t0))
+	b := f.add("b", item.StateNeedsYou, "critical", t0, finishedRun(1, item.OutcomeReady, t0))
+	f.writeRunFile(a, 1, item.ReportFile, "# Report A\n\nbody a\n")
+	f.writeRunFile(b, 1, item.ReportFile, "# Report B\n\nbody b\n")
+	f.snapshot()
+
+	// The render is pending: the preview shows the plain source and the
+	// model keeps handling input, heartbeats and resizes.
+	if len(f.d.held) != 1 || len(r.calls) != 1 {
+		t.Fatalf("want one pending render, got held=%d calls=%d", len(f.d.held), len(r.calls))
+	}
+	if v := f.view(); !strings.Contains(v, "# Report A") || strings.Contains(v, "RENDERED") {
+		t.Fatalf("pending render must show the plain report:\n%s", v)
+	}
+	f.now = t0.Add(time.Second)
+	f.d.send(HeartbeatMsg(f.now))
+	f.d.keys("j")
+	if got := f.d.m.SelectedID(); got != b {
+		t.Fatalf("navigation blocked while rendering: selected %q", got)
+	}
+	f.d.send(tea.WindowSizeMsg{Width: 120, Height: 40})
+	if len(r.calls) != 1 {
+		t.Fatalf("a second render started while one is in flight: %v", r.calls)
+	}
+
+	// The finished render is for a document no longer shown: it is dropped
+	// and the needed one is started.
+	f.d.release()
+	if f.d.m.md.lines != nil {
+		t.Fatalf("stale render applied: %+v", f.d.m.md.key)
+	}
+	if len(r.calls) != 2 || !strings.Contains(r.calls[1].src, "Report B") ||
+		r.calls[1].width != f.d.m.previewContentWidth() {
+		t.Fatalf("needed render not started: %v", r.calls)
+	}
+	f.d.release()
+	if v := f.view(); !strings.Contains(v, fmt.Sprintf("RENDERED@%d", f.d.m.previewContentWidth())) {
+		t.Fatalf("render not shown:\n%s", v)
+	}
+
+	// Quitting does not wait for a pending render.
+	f.d.keys("k")
+	if len(f.d.held) != 1 {
+		t.Fatalf("want a pending render for the other item, held=%d", len(f.d.held))
+	}
+	f.d.keys("q")
+	if !f.d.quit {
+		t.Fatal("quit blocked by a pending render")
+	}
+}
+
+func TestQuitWhileMarkdownRenderBlocks(t *testing.T) {
+	block := make(chan struct{})
+	started := make(chan struct{}, 1)
+	t.Cleanup(func() { close(block) })
+	f := newFixture(t, func(o *Options) {
+		o.RenderMarkdown = func(string, int) []string {
+			started <- struct{}{}
+			<-block
+			return nil
+		}
+	})
+	a := f.add("a", item.StateNeedsYou, "critical", t0, finishedRun(1, item.OutcomeReady, t0))
+	f.writeRunFile(a, 1, item.ReportFile, "# Report\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := New(ctx, f.opts)
+	p := tea.NewProgram(m, tea.WithContext(ctx), tea.WithInput(nil), tea.WithOutput(io.Discard),
+		tea.WithoutSignalHandler(), tea.WithWindowSize(140, 40))
+	done := make(chan error, 1)
+	go func() { _, err := p.Run(); done <- err }()
+	f.opts.Feed.Publish(f.snap())
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("render did not start")
+	}
+	p.Send(key("q"))
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("quit waited for the blocked render")
 	}
 }

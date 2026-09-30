@@ -277,8 +277,10 @@ the selected item and shows its metadata, then:
   the log with `l`).
 
 Markdown is rendered with [glamour](https://github.com/charmbracelet/glamour)
-and wrapped to the preview width. Report and alert content is sanitized: only
-text, colors and hyperlinks reach the terminal, never other escape sequences.
+and wrapped to the preview width. Rendering happens in the background, so the
+TUI stays responsive: until it finishes (and after a resize) the document is
+shown as plain text. Report and alert content is sanitized: only text, colors
+and hyperlinks reach the terminal, never other escape sequences.
 Documents over 1 MiB are shown as plain text; files over 16 MiB are not read.
 
 The latest Copilot message comes from the last 256 KiB of the run's

@@ -5,10 +5,13 @@ import (
 	"strings"
 	"unicode"
 
+	tea "charm.land/bubbletea/v2"
 	"charm.land/glamour/v2"
 	gansi "charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/ricoberger/tower/internal/item"
 )
 
 // MaxRenderBytes bounds the Markdown that is rendered; larger documents are
@@ -27,22 +30,87 @@ var markdownStyle = func() gansi.StyleConfig {
 // trailingPadding matches trailing spaces and SGR sequences of a line.
 var trailingPadding = regexp.MustCompile(`(?:\x1b\[[0-9;:]*m| )+$`)
 
-// mdCache holds the rendered lines of the latest rendered document.
-type mdCache struct {
+// mdKey identifies a rendered document: its source and the wrap width.
+type mdKey struct {
 	src   string
 	width int
+}
+
+// mdCache holds the rendered lines of the latest rendered document.
+type mdCache struct {
+	key   mdKey
 	lines []string
 }
 
-// markdownLines returns src rendered as Markdown for the width. The result
-// is cached, so rendering only happens when the document or the width
-// changed.
+// markdownMsg delivers a document rendered in the background.
+type markdownMsg struct {
+	key   mdKey
+	lines []string
+}
+
+// markdownLines returns src rendered for the width when that rendering is
+// available. Rendering happens in the background (see renderMarkdown);
+// until it is done, the sanitized source is shown as plain text.
 func (m *Model) markdownLines(src string, width int) []string {
-	if m.md.lines != nil && m.md.width == width && m.md.src == src {
+	if m.md.lines != nil && m.md.key == (mdKey{src: src, width: width}) {
 		return m.md.lines
 	}
-	m.md = mdCache{src: src, width: width, lines: RenderMarkdown(src, width)}
-	return m.md.lines
+	if m.mdPlain.lines == nil || m.mdPlain.key.src != src {
+		m.mdPlain = mdCache{key: mdKey{src: src}, lines: plainLines(Sanitize(src))}
+	}
+	return m.mdPlain.lines
+}
+
+// wantMarkdown returns the document the preview of the selection shows
+// rendered: the report of a loaded ready/blocked run or the alert.md of an
+// item without a run, at the current preview width.
+func (m *Model) wantMarkdown() (mdKey, bool) {
+	width := m.previewContentWidth()
+	v, ok := m.selectedView()
+	if !ok || width <= 0 {
+		return mdKey{}, false
+	}
+	r, hasRun := v.Latest()
+	switch {
+	case !hasRun:
+		if m.alert.id != v.Item.ID || m.alert.err != nil {
+			return mdKey{}, false
+		}
+		return mdKey{src: m.alert.text, width: width}, true
+	case r.Outcome == item.OutcomeReady || r.Outcome == item.OutcomeBlocked:
+		if !m.loadedFor(v.Item.ID, r) || m.art.reportErr != nil {
+			return mdKey{}, false
+		}
+		return mdKey{src: m.art.report, width: width}, true
+	}
+	return mdKey{}, false
+}
+
+// renderMarkdown starts rendering the document the preview needs, off the
+// update loop, unless it is rendered already. At most one render is in
+// flight; a result is only applied while it is still the needed document,
+// and the next needed document is started when a render finishes.
+func (m *Model) renderMarkdown() tea.Cmd {
+	key, ok := m.wantMarkdown()
+	if !ok || m.mdPending || (m.md.lines != nil && m.md.key == key) {
+		return nil
+	}
+	m.mdPending = true
+	render := m.opts.RenderMarkdown
+	return func() tea.Msg { return markdownMsg{key: key, lines: render(key.src, key.width)} }
+}
+
+// applyMarkdown stores a background rendering if it is still needed.
+func (m *Model) applyMarkdown(msg markdownMsg) {
+	m.mdPending = false
+	if key, ok := m.wantMarkdown(); ok && key == msg.key {
+		m.md = mdCache(msg)
+	}
+}
+
+// plainLines splits sanitized text into lines without the final newline.
+func plainLines(s string) []string {
+	return strings.Split(strings.TrimRight(s, "\n"), "\n")
 }
 
 // RenderMarkdown renders Markdown wrapped to the width. The input is
@@ -53,9 +121,7 @@ func (m *Model) markdownLines(src string, width int) []string {
 // sanitized plain text.
 func RenderMarkdown(src string, width int) []string {
 	src = Sanitize(src)
-	plain := func() []string {
-		return strings.Split(strings.TrimRight(src, "\n"), "\n")
-	}
+	plain := func() []string { return plainLines(src) }
 	if len(src) > MaxRenderBytes || width < 1 {
 		return plain()
 	}
