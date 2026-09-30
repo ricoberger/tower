@@ -53,6 +53,15 @@ func (l *List) Handle(key string, n int) (moved bool) {
 	return true
 }
 
+// Move moves the selection by delta rows within a list of length n.
+func (l *List) Move(delta, n int) {
+	if n == 0 {
+		l.Selected = 0
+		return
+	}
+	l.Selected = min(max(l.Clamp(n)+delta, 0), n-1)
+}
+
 // Window computes the first visible row so the selection stays centered
 // while scrolling.
 func Window(length, selected, visible int) int {

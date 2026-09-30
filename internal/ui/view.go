@@ -117,7 +117,7 @@ func (m *Model) footerText() string {
 		}
 	}
 	if m.help {
-		return Dim("j/k ↓/↑ g/G scroll help · ? / esc close help · q quit")
+		return Dim("j/k ↓/↑ ctrl+d/u ctrl+f/b g/G home/end scroll help · ? / esc close help · q quit")
 	}
 	if m.footer != "" {
 		if m.footerErr {
@@ -248,16 +248,7 @@ func (m *Model) previewContent(width, height int) string {
 	if width <= 0 || height <= 0 {
 		return ""
 	}
-	var logical []string
-	if m.help {
-		logical = helpLines()
-	} else {
-		logical = m.previewLines(width)
-	}
-	var lines []string
-	for _, l := range logical {
-		lines = append(lines, strings.Split(ansi.Wrap(l, width, ""), "\n")...)
-	}
+	lines := m.wrappedPreview(width)
 	var scroll int
 	if m.help {
 		m.helpScroll = min(m.helpScroll, max(len(lines)-height, 0))
@@ -271,6 +262,43 @@ func (m *Model) previewContent(width, height int) string {
 		return ""
 	}
 	return strings.Join(lines[scroll:end], "\n")
+}
+
+// wrappedPreview returns the preview (or help) lines wrapped to the width.
+func (m *Model) wrappedPreview(width int) []string {
+	var logical []string
+	if m.help {
+		logical = helpLines()
+	} else {
+		logical = m.previewLines(width)
+	}
+	var lines []string
+	for _, l := range logical {
+		lines = append(lines, strings.Split(ansi.Wrap(l, width, ""), "\n")...)
+	}
+	return lines
+}
+
+// bodyContentHeight returns the content height of the list and preview
+// frames.
+func (m *Model) bodyContentHeight() int {
+	_, h := FrameContentSize(0, m.height-2)
+	return h
+}
+
+// halfPage returns the distance ctrl+d/ctrl+u and ctrl+f/ctrl+b move.
+func (m *Model) halfPage() int {
+	return max(m.bodyContentHeight()/2, 1)
+}
+
+// maxPreviewScroll returns the largest scroll offset of the preview (or
+// help) that still fills the frame.
+func (m *Model) maxPreviewScroll() int {
+	width, height := m.previewContentWidth(), m.bodyContentHeight()
+	if width <= 0 || height <= 0 {
+		return 0
+	}
+	return max(len(m.wrappedPreview(width))-height, 0)
 }
 
 func section(title string) string {
@@ -471,8 +499,14 @@ func helpLines() []string {
 	return []string{
 		section("Navigation"),
 		"j / k, ↓ / ↑   move the selection (scroll when the preview is focused)",
+		"ctrl+d / u    move the selection half a page down / up",
+		"              (scroll the preview when it is focused)",
 		"g / G         first / last item",
 		"tab           switch focus between list and preview",
+		"",
+		section("Preview"),
+		"ctrl+f / b    scroll the preview half a page down / up",
+		"home / end    scroll the preview to the top / bottom",
 		"",
 		section("Item actions"),
 		"enter / o     open the latest report in the editor (marks seen)",
@@ -496,6 +530,7 @@ func helpLines() []string {
 		"confirmation or this help is open.",
 		"",
 		section("This help"),
-		"j / k, ↓ / ↑, g / G scroll this help; ? or esc closes it.",
+		"j / k, ↓ / ↑, ctrl+d / ctrl+u, ctrl+f / ctrl+b, g / G, home / end",
+		"scroll this help; ? or esc closes it.",
 	}
 }

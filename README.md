@@ -296,7 +296,10 @@ run's result is not affected.
 | Key                | Action                                                                                |
 | ------------------ | ------------------------------------------------------------------------------------- |
 | `j` / `k`, `↓`/`↑` | Move the selection (or scroll the preview when it has focus)                           |
+| `ctrl+d` / `ctrl+u` | Move the selection half a page down / up (or scroll the preview half a page when it has focus) |
 | `g` / `G`          | First / last item                                                                       |
+| `ctrl+f` / `ctrl+b` | Scroll the preview half a page down / up                                               |
+| `home` / `end`     | Scroll the preview to the top / bottom                                                  |
 | `tab`              | Switch focus between list and preview                                                   |
 | `enter` / `o`      | Open the latest run's `report.md` in the editor                                         |
 | `c`                | Resume the latest run's session in Ghostty (`ghostty.placement`)                        |
@@ -308,7 +311,7 @@ run's result is not affected.
 | `a`                | Open the item directory in the editor                                                   |
 | `d`                | Show or hide done items updated in the last 7 days                                      |
 | `r`                | Poll all sources now                                                                    |
-| `?`                | Help (scroll with `j`/`k`, `↓`/`↑`, `g`/`G`; close with `?` or `esc`)                  |
+| `?`                | Help (scroll with `j`/`k`, `↓`/`↑`, `ctrl+d`/`ctrl+u`, `ctrl+f`/`ctrl+b`, `g`/`G`, `home`/`end`; close with `?` or `esc`) |
 | `q` / `ctrl+c`     | Quit; executing runs continue in the background                                         |
 
 - **Confirmations.** `x` and resuming a still-executing run ask in the footer.

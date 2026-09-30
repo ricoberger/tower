@@ -142,8 +142,13 @@ func key(k string) tea.KeyPressMsg {
 		return tea.KeyPressMsg{Code: tea.KeyDown}
 	case "up":
 		return tea.KeyPressMsg{Code: tea.KeyUp}
-	case "ctrl+c":
-		return tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}
+	case "home":
+		return tea.KeyPressMsg{Code: tea.KeyHome}
+	case "end":
+		return tea.KeyPressMsg{Code: tea.KeyEnd}
+	}
+	if c, ok := strings.CutPrefix(k, "ctrl+"); ok {
+		return tea.KeyPressMsg{Code: []rune(c)[0], Mod: tea.ModCtrl}
 	}
 	r := []rune(k)[0]
 	msg := tea.KeyPressMsg{Code: r, Text: k}
@@ -1436,4 +1441,135 @@ func TestHostileAlertMarkdownOnScreen(t *testing.T) {
 		t.Fatalf("hostile sequence reached the screen: %q", screen)
 	}
 	assertOnlySafeSequences(t, screen)
+}
+
+// linesRenderer renders every document as n numbered lines.
+func linesRenderer(n int) func(string, int) []string {
+	return func(string, int) []string {
+		lines := make([]string, n)
+		for i := range lines {
+			lines[i] = fmt.Sprintf("line %03d", i)
+		}
+		return lines
+	}
+}
+
+func TestPagingKeys(t *testing.T) {
+	f := newFixture(t, func(o *Options) { o.RenderMarkdown = linesRenderer(200) })
+	for i := range 60 {
+		id := f.add(fmt.Sprintf("i%02d", i), item.StateNeedsYou, "critical", t0.Add(-time.Duration(100-i)*time.Minute),
+			finishedRun(1, item.OutcomeReady, t0))
+		f.writeRunFile(id, 1, item.ReportFile, "# Report\n")
+	}
+	f.snapshot()
+	ids := f.d.m.visible
+	half := f.d.m.halfPage()
+	if _, ch := FrameContentSize(0, 40-2); half != ch/2 || half < 2 {
+		t.Fatalf("half page %d", half)
+	}
+	sel := func() int {
+		t.Helper()
+		for i, v := range ids {
+			if v.Item.ID == f.d.m.SelectedID() {
+				return i
+			}
+		}
+		t.Fatal("no selection")
+		return -1
+	}
+
+	// In the list, ctrl+d and ctrl+u move the selection by half a page and
+	// stop at the ends.
+	f.d.keys("ctrl+d")
+	if sel() != half || f.d.m.scroll != 0 {
+		t.Fatalf("ctrl+d: selection %d scroll %d", sel(), f.d.m.scroll)
+	}
+	f.d.keys("ctrl+d", "ctrl+d", "ctrl+d", "ctrl+d")
+	if sel() != len(ids)-1 {
+		t.Fatalf("ctrl+d at the end: selection %d", sel())
+	}
+	f.d.keys("ctrl+u")
+	if sel() != len(ids)-1-half {
+		t.Fatalf("ctrl+u: selection %d", sel())
+	}
+	f.d.keys("ctrl+u", "ctrl+u", "ctrl+u", "ctrl+u")
+	if sel() != 0 {
+		t.Fatalf("ctrl+u at the start: selection %d", sel())
+	}
+
+	// ctrl+f, ctrl+b, home and end scroll the preview while the list keeps
+	// the focus and the selection.
+	maxScroll := f.d.m.maxPreviewScroll()
+	if maxScroll < 3*half {
+		t.Fatalf("preview too short: max scroll %d", maxScroll)
+	}
+	f.d.keys("ctrl+f", "ctrl+f")
+	if f.d.m.scroll != 2*half || sel() != 0 || f.d.m.focus != focusList {
+		t.Fatalf("ctrl+f: scroll %d selection %d", f.d.m.scroll, sel())
+	}
+	f.d.keys("ctrl+b")
+	if f.d.m.scroll != half {
+		t.Fatalf("ctrl+b: scroll %d", f.d.m.scroll)
+	}
+	f.d.keys("end")
+	if f.d.m.scroll != maxScroll || !strings.Contains(f.view(), "line 199") {
+		t.Fatalf("end: scroll %d of %d:\n%s", f.d.m.scroll, maxScroll, f.view())
+	}
+	f.d.keys("ctrl+f")
+	if f.d.m.scroll != maxScroll {
+		t.Fatalf("ctrl+f past the end: scroll %d", f.d.m.scroll)
+	}
+	f.d.keys("home")
+	if f.d.m.scroll != 0 || !strings.Contains(f.view(), "line 000") {
+		t.Fatalf("home: scroll %d", f.d.m.scroll)
+	}
+	f.d.keys("ctrl+b")
+	if f.d.m.scroll != 0 {
+		t.Fatalf("ctrl+b at the top: scroll %d", f.d.m.scroll)
+	}
+
+	// With the preview focused, ctrl+d and ctrl+u scroll it instead.
+	f.d.keys("tab", "ctrl+d", "ctrl+d")
+	if f.d.m.scroll != 2*half || sel() != 0 {
+		t.Fatalf("ctrl+d in the preview: scroll %d selection %d", f.d.m.scroll, sel())
+	}
+	f.d.keys("ctrl+u")
+	if f.d.m.scroll != half || sel() != 0 {
+		t.Fatalf("ctrl+u in the preview: scroll %d selection %d", f.d.m.scroll, sel())
+	}
+
+	// The help overlay pages itself; the preview scroll is untouched.
+	f.d.send(tea.WindowSizeMsg{Width: 140, Height: 16})
+	half = f.d.m.halfPage()
+	scroll := f.d.m.scroll
+	f.d.keys("?", "ctrl+d")
+	if f.d.m.helpScroll != half {
+		t.Fatalf("ctrl+d in help: %d", f.d.m.helpScroll)
+	}
+	f.d.keys("end")
+	if f.d.m.helpScroll != f.d.m.maxPreviewScroll() || f.d.m.helpScroll <= half {
+		t.Fatalf("end in help: %d", f.d.m.helpScroll)
+	}
+	f.d.keys("ctrl+b")
+	if f.d.m.helpScroll != f.d.m.maxPreviewScroll()-half {
+		t.Fatalf("ctrl+b in help: %d", f.d.m.helpScroll)
+	}
+	f.d.keys("home", "ctrl+f", "ctrl+u")
+	if f.d.m.helpScroll != 0 || f.d.m.scroll != scroll || sel() != 0 {
+		t.Fatalf("help: helpScroll %d scroll %d selection %d", f.d.m.helpScroll, f.d.m.scroll, sel())
+	}
+	if !strings.Contains(f.view(), "ctrl+f / b") {
+		t.Fatalf("help lacks the paging keys:\n%s", f.view())
+	}
+	f.d.keys("?")
+
+	// A confirmation captures the paging keys.
+	f.d.keys("tab", "x")
+	if f.d.m.confirm == nil {
+		t.Fatal("no confirmation")
+	}
+	f.d.keys("ctrl+d", "ctrl+f", "end", "home", "ctrl+u", "ctrl+b")
+	if sel() != 0 || f.d.m.scroll != scroll || f.d.m.confirm == nil {
+		t.Fatalf("confirmation: selection %d scroll %d", sel(), f.d.m.scroll)
+	}
 }

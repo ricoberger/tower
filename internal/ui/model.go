@@ -525,10 +525,14 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			m.helpScroll++
 		case "k", "up":
 			m.helpScroll = max(m.helpScroll-1, 0)
-		case "g":
+		case "ctrl+d", "ctrl+f":
+			m.helpScroll = min(m.helpScroll+m.halfPage(), m.maxPreviewScroll())
+		case "ctrl+u", "ctrl+b":
+			m.helpScroll = max(m.helpScroll-m.halfPage(), 0)
+		case "g", "home":
 			m.helpScroll = 0
-		case "G":
-			m.helpScroll = 1 << 30 // clamped when rendered
+		case "G", "end":
+			m.helpScroll = m.maxPreviewScroll()
 		}
 		return m, nil
 	}
@@ -564,6 +568,33 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return "poll started", m.opts.Engine.PollNow(ctx)
 		})
 	}
+	// ctrl+d and ctrl+u page the focused frame: they move the selection by
+	// half a page in the list and scroll the preview like ctrl+f/ctrl+b.
+	if m.focus == focusList {
+		switch k {
+		case "ctrl+d":
+			m.list.Move(m.halfPage(), len(m.visible))
+			return m, m.selectionMoved()
+		case "ctrl+u":
+			m.list.Move(-m.halfPage(), len(m.visible))
+			return m, m.selectionMoved()
+		}
+	}
+	// ctrl+f, ctrl+b, home and end scroll the preview regardless of focus.
+	switch k {
+	case "ctrl+f", "ctrl+d":
+		m.scroll = min(m.scroll+m.halfPage(), m.maxPreviewScroll())
+		return m, nil
+	case "ctrl+b", "ctrl+u":
+		m.scroll = max(m.scroll-m.halfPage(), 0)
+		return m, nil
+	case "home":
+		m.scroll = 0
+		return m, nil
+	case "end":
+		m.scroll = m.maxPreviewScroll()
+		return m, nil
+	}
 	if m.focus == focusPreview {
 		switch k {
 		case "j", "down":
@@ -576,14 +607,20 @@ func (m *Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	}
 	// g and G select the first and last item regardless of focus.
 	if m.list.Handle(k, len(m.visible)) {
-		prev := m.selected
-		m.syncSelected()
-		if m.selected != prev {
-			m.scroll = 0
-		}
-		return m, m.loadPreview()
+		return m, m.selectionMoved()
 	}
 	return m, m.itemAction(k)
+}
+
+// selectionMoved follows a list navigation: it syncs the selected item,
+// resets the preview scroll when the item changed and loads its preview.
+func (m *Model) selectionMoved() tea.Cmd {
+	prev := m.selected
+	m.syncSelected()
+	if m.selected != prev {
+		m.scroll = 0
+	}
+	return m.loadPreview()
 }
 
 // request runs an engine request in the background and reports its outcome
