@@ -1,11 +1,12 @@
-package ui
+// Package snapshot holds the read-only view of the engine's applied state
+// that the engine publishes and the TUI renders, and the feed that hands the
+// latest snapshot from one to the other. It depends on neither side, so the
+// engine does not import the UI.
+package snapshot
 
 import (
-	"context"
 	"sync"
 	"time"
-
-	tea "charm.land/bubbletea/v2"
 
 	"github.com/ricoberger/tower/internal/item"
 )
@@ -101,18 +102,9 @@ func (f *Feed) Latest() (Snapshot, bool) {
 	return f.snap, f.has
 }
 
-// SnapshotMsg delivers a snapshot to the model.
-type SnapshotMsg Snapshot
-
-// wait returns a command that delivers the next published snapshot.
-func (f *Feed) wait(ctx context.Context) tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case <-f.signal:
-			s, _ := f.Latest()
-			return SnapshotMsg(s)
-		case <-ctx.Done():
-			return nil
-		}
-	}
+// Updated returns a channel that receives a value after a Publish. Several
+// publishes between two receives are coalesced into one value; read the
+// snapshot with Latest after receiving.
+func (f *Feed) Updated() <-chan struct{} {
+	return f.signal
 }

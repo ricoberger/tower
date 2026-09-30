@@ -13,6 +13,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/snapshot"
 )
 
 // EditorStopDelay is how long a terminated editor may take to exit on
@@ -53,7 +54,7 @@ type ResumeRequest struct {
 
 // Options configures the model.
 type Options struct {
-	Feed   *Feed
+	Feed   *snapshot.Feed
 	Engine Engine
 	Store  Store
 	Now    func() time.Time
@@ -108,7 +109,7 @@ type confirmation struct {
 // group is one displayed state group.
 type group struct {
 	label string
-	items []ItemView
+	items []snapshot.ItemView
 }
 
 // HeartbeatMsg drives the one-second display refresh.
@@ -148,11 +149,11 @@ type Model struct {
 	width, height int
 	now           time.Time
 
-	snap    Snapshot
+	snap    snapshot.Snapshot
 	hasSnap bool
 
 	groups  []group
-	visible []ItemView
+	visible []snapshot.ItemView
 	list    List
 	// selected is the identity of the selected item ("" when none).
 	selected string
@@ -198,7 +199,7 @@ func New(ctx context.Context, opts Options) *Model {
 
 // Init starts the snapshot subscription and the heartbeat.
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.opts.Feed.wait(m.ctx), m.tick(), m.loadPreview())
+	return tea.Batch(waitFeed(m.ctx, m.opts.Feed), m.tick(), m.loadPreview())
 }
 
 func (m *Model) tick() tea.Cmd {
@@ -221,8 +222,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 	case SnapshotMsg:
-		m.applySnapshot(Snapshot(msg))
-		return m, tea.Batch(m.opts.Feed.wait(m.ctx), m.loadPreview())
+		m.applySnapshot(snapshot.Snapshot(msg))
+		return m, tea.Batch(waitFeed(m.ctx, m.opts.Feed), m.loadPreview())
 	case HeartbeatMsg:
 		m.now = m.opts.Now()
 		m.rebuild()
@@ -270,7 +271,7 @@ func (m *Model) hintErr(err error) tea.Msg {
 }
 
 // applySnapshot replaces the engine state and rebuilds the list.
-func (m *Model) applySnapshot(s Snapshot) {
+func (m *Model) applySnapshot(s snapshot.Snapshot) {
 	m.snap, m.hasSnap = s, true
 	m.now = m.opts.Now()
 	m.rebuild()
@@ -306,7 +307,7 @@ func (m *Model) severityRank(s string) int {
 
 // compareItems orders by severity (unknown last), then alert start (oldest
 // first), then ID.
-func (m *Model) compareItems(a, b ItemView) int {
+func (m *Model) compareItems(a, b snapshot.ItemView) int {
 	if c := m.severityRank(a.Item.Severity) - m.severityRank(b.Item.Severity); c != 0 {
 		return c
 	}
@@ -319,7 +320,7 @@ func (m *Model) compareItems(a, b ItemView) int {
 // rebuild recomputes the groups and keeps the selection on the same item
 // when it is still visible.
 func (m *Model) rebuild() {
-	buckets := make([][]ItemView, len(groupLabels))
+	buckets := make([][]snapshot.ItemView, len(groupLabels))
 	cutoff := m.now.Add(-DoneWindow)
 	for _, v := range m.snap.Items {
 		if v.Item == nil {
@@ -345,7 +346,7 @@ func (m *Model) rebuild() {
 		m.visible = append(m.visible, b...)
 	}
 	prev := m.selected
-	idx := slices.IndexFunc(m.visible, func(v ItemView) bool { return v.Item.ID == m.selected })
+	idx := slices.IndexFunc(m.visible, func(v snapshot.ItemView) bool { return v.Item.ID == m.selected })
 	if idx >= 0 {
 		m.list.Selected = idx
 	} else {
@@ -368,26 +369,26 @@ func (m *Model) syncSelected() {
 }
 
 // selectedView returns the selected item.
-func (m *Model) selectedView() (ItemView, bool) {
+func (m *Model) selectedView() (snapshot.ItemView, bool) {
 	if m.selected == "" {
-		return ItemView{}, false
+		return snapshot.ItemView{}, false
 	}
 	for _, v := range m.visible {
 		if v.Item.ID == m.selected {
 			return v, true
 		}
 	}
-	return ItemView{}, false
+	return snapshot.ItemView{}, false
 }
 
 // findView returns an item of the latest snapshot by ID.
-func (m *Model) findView(id string) (ItemView, bool) {
+func (m *Model) findView(id string) (snapshot.ItemView, bool) {
 	for _, v := range m.snap.Items {
 		if v.Item != nil && v.Item.ID == id {
 			return v, true
 		}
 	}
-	return ItemView{}, false
+	return snapshot.ItemView{}, false
 }
 
 // wantKey returns the artifacts the preview of the selection needs.
@@ -615,7 +616,7 @@ func Resumable(r item.Run) error {
 	return nil
 }
 
-func (m *Model) resume(v ItemView, placement string) tea.Cmd {
+func (m *Model) resume(v snapshot.ItemView, placement string) tea.Cmd {
 	r, ok := v.Latest()
 	if !ok {
 		m.setHint("the item has no run to resume", true)
@@ -749,7 +750,7 @@ func browserURL(a item.AlertInfo) (string, error) {
 	return u, nil
 }
 
-func (m *Model) openURL(v ItemView) tea.Cmd {
+func (m *Model) openURL(v snapshot.ItemView) tea.Cmd {
 	u, err := browserURL(v.Item.Alert)
 	if err != nil {
 		m.setHint(err.Error(), true)

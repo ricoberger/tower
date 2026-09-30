@@ -18,8 +18,8 @@ import (
 
 	"github.com/ricoberger/tower/internal/config"
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/snapshot"
 	"github.com/ricoberger/tower/internal/source"
-	"github.com/ricoberger/tower/internal/ui"
 )
 
 // fakeAlertmanager is a local Alertmanager API returning a configurable
@@ -1034,7 +1034,7 @@ func TestEnginePollNowAndFeed(t *testing.T) {
 	fast.set([]source.Alert{mkAlert(t, "fast", "aaa", t0)}, nil)
 	gate := make(chan struct{})
 	fast.setGate(gate, nil)
-	feed := ui.NewFeed()
+	feed := snapshot.NewFeed()
 	started := make(chan struct{})
 	h := startEngine(t, engineOptions{
 		cfg: cfg, now: func() time.Time { return t0 }, sources: []source.Source{fast},

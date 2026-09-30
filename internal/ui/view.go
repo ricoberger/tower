@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/snapshot"
 )
 
 // View renders the header, the item list, the preview and the footer.
@@ -128,7 +129,7 @@ func runLabel(r item.Run) string {
 }
 
 // rowStatus returns the icon and right-aligned status of a list row.
-func (m *Model) rowStatus(v ItemView) (string, string) {
+func (m *Model) rowStatus(v snapshot.ItemView) (string, string) {
 	it := v.Item
 	r, hasRun := v.Latest()
 	if hasRun && r.Outcome == item.OutcomeRunning {
@@ -200,7 +201,7 @@ func (m *Model) listContent(width, height int) string {
 	return ListView(rows, selRow, ch, 0)
 }
 
-func (m *Model) row(v ItemView, selected bool, width int) string {
+func (m *Model) row(v snapshot.ItemView, selected bool, width int) string {
 	icon, status := m.rowStatus(v)
 	style := lipgloss.NewStyle()
 	if !v.Item.Seen {
@@ -309,7 +310,7 @@ func (m *Model) previewLines() []string {
 }
 
 // metaLine renders severity, source, alert status, run and confidence.
-func (m *Model) metaLine(v ItemView) string {
+func (m *Model) metaLine(v snapshot.ItemView) string {
 	it := v.Item
 	parts := []string{}
 	if it.Severity != "" {

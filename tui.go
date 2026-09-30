@@ -14,6 +14,7 @@ import (
 	"github.com/ricoberger/tower/internal/bounded"
 	"github.com/ricoberger/tower/internal/config"
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/snapshot"
 	"github.com/ricoberger/tower/internal/ui"
 )
 
@@ -57,7 +58,7 @@ func openBrowser(ctx context.Context, rawURL string) error {
 func runTUI(ctx context.Context, cfg *config.Config, level slog.Level, stderr io.Writer, e env) int {
 	engineCtx, stopEngine := context.WithCancel(ctx)
 	defer stopEngine()
-	feed := ui.NewFeed()
+	feed := snapshot.NewFeed()
 	api := newEngineAPI()
 	started := make(chan struct{})
 	engineErr := make(chan error, 1)

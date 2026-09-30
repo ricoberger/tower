@@ -38,6 +38,8 @@ Ghostty split).
 | `internal/runner` | Priority queue, detached runs, completion, timeout/cancel, recovery |
 | `internal/result` | `result.json` types, schema and validation |
 | `internal/notify` | macOS notifications (terminal-notifier / osascript) |
+| `internal/snapshot` | Read-only snapshot of the engine's applied state and the non-blocking feed from engine to TUI (the engine never imports `internal/ui`) |
+| `internal/ui` | Bubble Tea TUI: renders snapshots, calls the engine API, editor/pager handoff |
 | `testdata/fake-copilot.sh` | Fake Copilot CLI for runner tests (controlled by `FAKE_COPILOT_*` env vars) |
 
 ## Commands

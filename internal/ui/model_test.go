@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/snapshot"
 )
 
 var t0 = time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
@@ -169,7 +170,7 @@ func newFixture(t *testing.T, mut func(*Options)) *fixture {
 	// snapshots are sent directly.
 	cancel()
 	f.opts = Options{
-		Feed:          NewFeed(),
+		Feed:          snapshot.NewFeed(),
 		Engine:        f.engine,
 		Store:         st,
 		Now:           func() time.Time { return f.now },
@@ -243,7 +244,7 @@ func (f *fixture) add(fp string, state item.State, severity string, startsAt tim
 // snapshot sends the current fixture items to the model.
 func (f *fixture) snapshot() {
 	f.t.Helper()
-	var s Snapshot
+	var s snapshot.Snapshot
 	ids := make([]string, 0, len(f.items))
 	for id := range f.items {
 		ids = append(ids, id)
@@ -255,9 +256,9 @@ func (f *fixture) snapshot() {
 		for _, r := range f.runs[id] {
 			runs = append(runs, r.Clone())
 		}
-		s.Items = append(s.Items, ItemView{Item: it.Clone(), Runs: runs})
+		s.Items = append(s.Items, snapshot.ItemView{Item: it.Clone(), Runs: runs})
 	}
-	s.Sources = []SourceHealth{{Name: "dev", LastSuccess: f.now.Add(-5 * time.Second)}}
+	s.Sources = []snapshot.SourceHealth{{Name: "dev", LastSuccess: f.now.Add(-5 * time.Second)}}
 	s.Concurrency = 2
 	f.d.send(SnapshotMsg(s))
 }
@@ -696,8 +697,8 @@ func TestHeader(t *testing.T) {
 	if !strings.Contains(f.view(), "starting") {
 		t.Fatal("no starting header")
 	}
-	s := Snapshot{
-		Sources: []SourceHealth{
+	s := snapshot.Snapshot{
+		Sources: []snapshot.SourceHealth{
 			{Name: "fresh"},
 			{Name: "ok", LastSuccess: t0.Add(-90 * time.Second)},
 			{Name: "broken", LastSuccess: t0.Add(-time.Hour), LastErr: "fetch: HTTP 500"},
@@ -723,13 +724,13 @@ func TestHeader(t *testing.T) {
 	}
 	// A failed notification delivery is shown, sanitized, until a later
 	// delivery succeeds.
-	s.Notify = NotifyHealth{LastErr: "terminal-notifier failed:\x1b[31m exit status 1", ItemID: "x", ItemTitle: "Alert\nx"}
+	s.Notify = snapshot.NotifyHealth{LastErr: "terminal-notifier failed:\x1b[31m exit status 1", ItemID: "x", ItemTitle: "Alert\nx"}
 	f.d.send(SnapshotMsg(s))
 	h = ansi.Strip(f.view())
 	if !strings.Contains(h, "notification ✗ terminal-notifier failed:[31m exit status 1 (Alert x)") {
 		t.Fatalf("header %q", h)
 	}
-	s.Notify = NotifyHealth{}
+	s.Notify = snapshot.NotifyHealth{}
 	f.d.send(SnapshotMsg(s))
 	if h = ansi.Strip(f.d.m.headerText()); strings.Contains(h, "notification") {
 		t.Fatalf("header %q", h)

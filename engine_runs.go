@@ -13,7 +13,7 @@ import (
 	"github.com/ricoberger/tower/internal/reconcile"
 	"github.com/ricoberger/tower/internal/result"
 	"github.com/ricoberger/tower/internal/runner"
-	"github.com/ricoberger/tower/internal/ui"
+	"github.com/ricoberger/tower/internal/snapshot"
 )
 
 // startRetryDelay is how long a queued run whose start failed without a
@@ -463,9 +463,9 @@ type notifyOutcome struct {
 }
 
 // notifyHealth returns the latest delivery failure for the UI.
-func (e *engine) notifyHealth() ui.NotifyHealth {
+func (e *engine) notifyHealth() snapshot.NotifyHealth {
 	if e.notifyErr == nil {
-		return ui.NotifyHealth{}
+		return snapshot.NotifyHealth{}
 	}
-	return ui.NotifyHealth{LastErr: e.notifyErr.err, ItemID: e.notifyErr.itemID, ItemTitle: e.notifyErr.title}
+	return snapshot.NotifyHealth{LastErr: e.notifyErr.err, ItemID: e.notifyErr.itemID, ItemTitle: e.notifyErr.title}
 }

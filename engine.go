@@ -20,8 +20,8 @@ import (
 	"github.com/ricoberger/tower/internal/prompt/prep"
 	"github.com/ricoberger/tower/internal/reconcile"
 	"github.com/ricoberger/tower/internal/runner"
+	"github.com/ricoberger/tower/internal/snapshot"
 	"github.com/ricoberger/tower/internal/source"
-	"github.com/ricoberger/tower/internal/ui"
 )
 
 const (
@@ -64,7 +64,7 @@ type engineOptions struct {
 
 	// feed receives a snapshot of the applied state after every loop
 	// iteration (TUI mode; optional).
-	feed *ui.Feed
+	feed *snapshot.Feed
 	// started is called once the instance lock is held and the engine is
 	// about to enter its loop (optional).
 	started func()
@@ -374,11 +374,11 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 
 // publish hands an independent copy of the applied state to the UI. It runs
 // on the engine loop only.
-func (e *engine) publish(feed *ui.Feed) {
+func (e *engine) publish(feed *snapshot.Feed) {
 	if feed == nil {
 		return
 	}
-	snap := ui.Snapshot{
+	snap := snapshot.Snapshot{
 		Unreadable:  len(e.unreadable),
 		Notify:      e.notifyHealth(),
 		Running:     e.runner.Busy(),
@@ -390,10 +390,10 @@ func (e *engine) publish(feed *ui.Feed) {
 		for i, r := range c.loaded.Runs {
 			runs[i] = r.Clone()
 		}
-		snap.Items = append(snap.Items, ui.ItemView{Item: c.loaded.Item.Clone(), Runs: runs})
+		snap.Items = append(snap.Items, snapshot.ItemView{Item: c.loaded.Item.Clone(), Runs: runs})
 	}
 	for _, src := range e.sources {
-		h := ui.SourceHealth{Name: src.Name()}
+		h := snapshot.SourceHealth{Name: src.Name()}
 		if st := e.status[src.Name()]; st != nil {
 			h.LastSuccess, h.LastErr = st.lastSuccess, st.lastErr
 		}
