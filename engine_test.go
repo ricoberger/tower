@@ -202,6 +202,9 @@ type harness struct {
 	t                                         *testing.T
 	tick, poll                                chan time.Time
 	started, applied, skipped, ticked, pruned chan struct{}
+	monitored                                 chan struct{}
+	deliveries                                *deliveries
+	api                                       *engineAPI
 	cancel                                    context.CancelFunc
 	done                                      chan error
 	stderr                                    *syncBuffer
@@ -213,13 +216,31 @@ func startEngine(t *testing.T, opts engineOptions) *harness {
 	h := &harness{
 		t: t, tick: make(chan time.Time), poll: make(chan time.Time),
 		started: make(chan struct{}, 64), applied: make(chan struct{}, 64), skipped: make(chan struct{}, 64),
-		ticked: make(chan struct{}, 64), pruned: make(chan struct{}, 64),
-		done: make(chan error, 1), stderr: &syncBuffer{},
+		ticked: make(chan struct{}, 64), pruned: make(chan struct{}, 64), monitored: make(chan struct{}, 1),
+		done: make(chan error, 1), stderr: &syncBuffer{}, deliveries: newDeliveries(),
 	}
 	signal := func(ch chan struct{}) func() { return func() { ch <- struct{}{} } }
 	opts.hooks = engineHooks{
 		roundStarted: signal(h.started), roundApplied: signal(h.applied), pollSkipped: signal(h.skipped),
 		ticked: signal(h.ticked), pruneApplied: signal(h.pruned),
+		monitored: func() {
+			select {
+			case h.monitored <- struct{}{}:
+			default:
+			}
+		},
+	}
+	if opts.deliver == nil {
+		opts.deliver = h.deliveries.deliver
+	}
+	if opts.api == nil {
+		opts.api = newEngineAPI()
+	}
+	h.api = opts.api
+	if opts.monitorC == nil {
+		monitor := time.NewTicker(20 * time.Millisecond)
+		t.Cleanup(monitor.Stop)
+		opts.monitorC = monitor.C
 	}
 	opts.tickC, opts.pollC = h.tick, h.poll
 	opts.stderr = h.stderr
@@ -306,7 +327,7 @@ func fakeConfig(t *testing.T, names ...string) (*config.Config, string) {
 	t.Helper()
 	dir := t.TempDir()
 	var b strings.Builder
-	b.WriteString("state_dir: ./state\nruns:\n  command: sh\nsources:\n")
+	b.WriteString("state_dir: ./state\n" + fakeRuns(t, filepath.Join(dir, "state")) + "sources:\n")
 	for _, n := range names {
 		fmt.Fprintf(&b, "  - name: %s\n    type: file\n    path: ./%s.json\n", n, n)
 	}
@@ -489,8 +510,8 @@ func TestEngineTicksUseAppliedSnapshots(t *testing.T) {
 	// advance the previously healthy source only.
 	clock.add(5 * time.Hour)
 	h.doTick()
-	if s := itemState(t, stateDir, "alert-a-aaa-1"); s != item.StateQueued {
-		t.Errorf("healthy source item = %s, want queued (T2)", s)
+	if s := itemState(t, stateDir, "alert-a-aaa-1"); s != item.StatePreparing {
+		t.Errorf("healthy source item = %s, want preparing (T2, then started)", s)
 	}
 	if s := itemState(t, stateDir, oldA); s != item.StateDone {
 		t.Errorf("healthy source resolved item = %s, want done (T8)", s)
@@ -547,9 +568,7 @@ func httpSetup(t *testing.T, am *fakeAlertmanager) (cfgPath, stateDir, fixture, 
 	tokenFile = filepath.Join(dir, "token")
 	withUser := strings.Replace(am.URL, "http://", "http://syn-user:syn-url-password@", 1)
 	content := `state_dir: ./state
-runs:
-  command: sh
-sources:
+` + fakeRuns(t, stateDir) + `sources:
   - name: dev
     type: file
     path: ./alerts.json
@@ -592,7 +611,7 @@ func TestEngineHTTPSource(t *testing.T) {
 
 	id := "alert-legacy-aaa111-1"
 	itemDir := filepath.Join(stateDir, "items", id)
-	if s := itemState(t, stateDir, id); s != item.StateQueued {
+	if s := itemState(t, stateDir, id); s != item.StatePreparing {
 		t.Fatalf("http item = %s", s)
 	}
 	if am.lastAuth() != "Bearer "+credentialSentinel {
@@ -959,5 +978,48 @@ func TestEngineStartupWarnsAboutMissingInstance(t *testing.T) {
 	}
 	if am.requests() != 2 {
 		t.Errorf("requests = %d", am.requests())
+	}
+}
+
+// An item deleted by retention pruning while it is being loaded is
+// forgotten without being reported as unreadable; genuinely unreadable
+// items are still reported.
+func TestLoadDuringPruning(t *testing.T) {
+	st, err := item.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	id := seedItem(t, st, "fp1", item.StateDone, time.Now().Add(-time.Hour))
+	logs := &syncBuffer{}
+	e := &engine{
+		store: st, log: slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		items: map[string]*cachedItem{}, unreadable: map[string]item.Stamp{},
+	}
+	// A half-deleted item (item.yaml already removed) of the pruner.
+	if err := os.Remove(filepath.Join(st.ItemDir(id), "item.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	e.pruning.Store(id, struct{}{})
+	e.refresh()
+	if strings.Contains(logs.String(), "skipping unreadable item") || len(e.unreadable) != 0 || len(e.items) != 0 {
+		t.Fatalf("concurrent deletion reported as unreadable:\n%s", logs.String())
+	}
+	// The same state without a deletion in progress is unreadable.
+	e.pruning.Delete(id)
+	e.refresh()
+	if !strings.Contains(logs.String(), "skipping unreadable item") || len(e.unreadable) != 1 {
+		t.Fatalf("unreadable item not reported:\n%s", logs.String())
+	}
+	// A cached item whose directory is gone when it is (re)loaded.
+	e.unreadable = map[string]item.Stamp{}
+	e.items[id] = &cachedItem{}
+	before := strings.Count(logs.String(), "skipping unreadable item")
+	if err := os.RemoveAll(st.ItemDir(id)); err != nil {
+		t.Fatal(err)
+	}
+	e.load(id, item.Stamp{})
+	if strings.Count(logs.String(), "skipping unreadable item") != before || len(e.items) != 0 || len(e.unreadable) != 0 {
+		t.Fatalf("removed item reported as unreadable:\n%s", logs.String())
 	}
 }

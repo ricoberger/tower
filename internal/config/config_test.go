@@ -58,6 +58,15 @@ func mustLoad(t *testing.T, content string, env map[string]string) *Config {
 	return cfg
 }
 
+// ignoreMissingPrompt drops the error of a prompts.alert override that does
+// not exist, for tests that only check how the path is normalized.
+func ignoreMissingPrompt(r Report) Report {
+	r.Errors = slices.DeleteFunc(slices.Clone(r.Errors), func(m string) bool {
+		return m == "prompts.alert: cannot read the override template: no such file or directory"
+	})
+	return r
+}
+
 func hasMessage(msgs []string, sub string) bool {
 	return slices.ContainsFunc(msgs, func(m string) bool { return strings.Contains(m, sub) })
 }
@@ -331,7 +340,7 @@ func TestTypeChecksCoverYAMLIndirection(t *testing.T) {
 			"notifications:\n  enabled: !!bool 'false'\n  sound: !!str 2026-01-01\n" +
 			"prompts: {alert: ! p}\n"
 		cfg, report := load(t, content, nil)
-		if !report.OK() {
+		if report = ignoreMissingPrompt(report); !report.OK() {
 			t.Fatalf("report = %+v", report)
 		}
 		if cfg.Editor != "vi" || cfg.Sources[0].Path == "" || cfg.Runs.Concurrency != 2 ||
@@ -695,7 +704,7 @@ prompts:
   alert: prompts/alert.tmpl
 `)
 	cfg, report, err := Load(path, envMap(env))
-	if err != nil || !report.OK() {
+	if report = ignoreMissingPrompt(report); err != nil || !report.OK() {
 		t.Fatalf("Load: %v %v", err, report.Errors)
 	}
 	dir := filepath.Dir(path)
@@ -728,7 +737,7 @@ prompts:
 
 func TestBareExecutablesAndTildeForms(t *testing.T) {
 	env := map[string]string{"HOME": "/h"}
-	cfg := mustLoad(t, minimalSources+`
+	cfg, report := load(t, minimalSources+`
 editor: nvim
 state_dir: /s
 runs:
@@ -738,6 +747,9 @@ ghostty:
 prompts:
   alert: "~"
 `, env)
+	if report = ignoreMissingPrompt(report); !report.OK() {
+		t.Fatalf("errors = %v", report.Errors)
+	}
 	if cfg.Editor != "nvim" || cfg.Runs.Command != "copilot" || cfg.Ghostty.Command != "ghostty-new" {
 		t.Errorf("bare executables must be kept for PATH lookup: %q %q %q", cfg.Editor, cfg.Runs.Command, cfg.Ghostty.Command)
 	}
@@ -871,7 +883,7 @@ sources:
 prompts:
   alert: /does/not/exist.tmpl
 `, map[string]string{"GRAFANA_INSTANCES": `{"prod": {"url": "https://grafana.example.com", "auth": {"tokenCommand": "echo t"}}}`})
-	if !report.OK() {
+	if report = ignoreMissingPrompt(report); !report.OK() {
 		t.Fatalf("errors = %v", report.Errors)
 	}
 	if cfg.Sources[0].URL != nil || cfg.Sources[0].Auth != nil {
@@ -890,8 +902,11 @@ prompts:
 	if !hasMessage(report.Errors, "GRAFANA_INSTANCES") {
 		t.Errorf("errors = %v", report.Errors)
 	}
-	// An interpolated prompt override path is accepted without being read.
-	cfg = mustLoad(t, minimalSources+"state_dir: /s\nprompts:\n  alert: $P/x.tmpl\n", map[string]string{"P": "/nope"})
+	// An interpolated prompt override path is resolved before it is read.
+	cfg, report = load(t, minimalSources+"state_dir: /s\nprompts:\n  alert: $P/x.tmpl\n", map[string]string{"P": "/nope"})
+	if !slices.Equal(report.Errors, []string{"prompts.alert: cannot read the override template: no such file or directory"}) {
+		t.Errorf("errors = %v", report.Errors)
+	}
 	if cfg.Prompts.Alert != "/nope/x.tmpl" {
 		t.Errorf("prompts.alert = %q", cfg.Prompts.Alert)
 	}
@@ -971,4 +986,57 @@ func TestWriteExample(t *testing.T) {
 	if string(data) != "custom" {
 		t.Fatal("existing file was modified")
 	}
+}
+
+func TestPromptOverride(t *testing.T) {
+	write := func(t *testing.T, dir, text string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "alert.tmpl"), []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loadWith := func(t *testing.T, text string) (*Config, Report) {
+		t.Helper()
+		path := writeConfig(t, minimalSources+"state_dir: /s\nprompts:\n  alert: alert.tmpl\n")
+		write(t, filepath.Dir(path), text)
+		cfg, report, err := Load(path, envMap(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg, report
+	}
+
+	valid := "{{.RunDir}} {{.SourceName}}{{range .PreviousReports}} {{.}}{{end}}"
+	cfg, report := loadWith(t, valid)
+	if !report.OK() || cfg.Prompts.AlertText != valid || cfg.Prompts.Alert != filepath.Join(cfg.Dir, "alert.tmpl") {
+		t.Fatalf("valid override: %v %+v", report.Errors, cfg.Prompts)
+	}
+
+	for name, c := range map[string]struct{ text, want string }{
+		"parse error":             {"{{.RunDir", "prompts.alert: invalid template:"},
+		"unknown field":           {"{{.Secret}}", "can't evaluate field Secret"},
+		"error in populated loop": {"{{range .PreviousReports}}{{.Nope}}{{end}}", "can't evaluate field Nope"},
+		"unknown function":        {"{{exec .RunDir}}", "function \"exec\" not defined"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, report := loadWith(t, c.text)
+			if !hasMessage(report.Errors, c.want) || cfg.Prompts.AlertText != "" {
+				t.Errorf("errors = %v", report.Errors)
+			}
+		})
+	}
+
+	t.Run("unreadable", func(t *testing.T) {
+		path := writeConfig(t, minimalSources+"state_dir: /s\nprompts:\n  alert: dir\n")
+		if err := os.Mkdir(filepath.Join(filepath.Dir(path), "dir"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_, report, err := Load(path, envMap(nil))
+		if err != nil || !hasMessage(report.Errors, "prompts.alert: cannot read the override template") {
+			t.Fatalf("errors = %v %v", err, report.Errors)
+		}
+		if hasMessage(report.Errors, filepath.Dir(path)) {
+			t.Errorf("error discloses the path: %v", report.Errors)
+		}
+	})
 }

@@ -5,16 +5,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
+	"os"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/ricoberger/tower/internal/config"
 	"github.com/ricoberger/tower/internal/item"
+	"github.com/ricoberger/tower/internal/notify"
 	"github.com/ricoberger/tower/internal/prompt"
+	"github.com/ricoberger/tower/internal/prompt/prep"
 	"github.com/ricoberger/tower/internal/reconcile"
+	"github.com/ricoberger/tower/internal/runner"
 	"github.com/ricoberger/tower/internal/source"
 )
 
@@ -45,6 +50,16 @@ type engineOptions struct {
 	tickC   <-chan time.Time
 	pollC   <-chan time.Time
 	hooks   engineHooks
+
+	// api receives manual-run and dismiss requests (optional).
+	api *engineAPI
+	// deliver overrides the notification delivery (tests).
+	deliver func(context.Context, notify.Notification) error
+	// monitorC overrides the periodic run monitoring ticker and runner
+	// overrides the runner's grace, signalling and ownership checks
+	// (tests).
+	monitorC <-chan time.Time
+	runner   runner.Options
 }
 
 // engineHooks are called by the engine loop (tests only).
@@ -54,6 +69,7 @@ type engineHooks struct {
 	pollSkipped  func()
 	ticked       func()
 	pruneApplied func()
+	monitored    func()
 }
 
 func call(f func()) {
@@ -98,12 +114,26 @@ type engine struct {
 	status     map[string]*sourceStatus
 	meta       map[string]prompt.AlertMeta
 	pruned     chan []string
+	// pruning holds the IDs the background pruner is deleting; a failed
+	// load of such an item is a concurrent deletion, not corruption.
+	pruning sync.Map
 	// rounds delivers the combined result of a background poll round;
 	// inFlight is true from the start of a round until the loop applied it.
 	rounds       chan []pollResult
 	inFlight     bool
 	fetchTimeout time.Duration
 	hooks        engineHooks
+
+	runner  *runner.Runner
+	queue   *runner.Queue
+	blocked map[string]blockedStart
+	// pending are runner events whose item change could not be persisted;
+	// they are applied again by the next reconciliation.
+	pending []reconcile.Event
+	deliver func(context.Context, notify.Notification) error
+	// bgCtx and wg bound background work (polls, pruning, notifications).
+	bgCtx context.Context
+	wg    *sync.WaitGroup
 }
 
 // runEngine runs the headless engine until ctx is cancelled.
@@ -149,6 +179,24 @@ func runEngine(ctx context.Context, opts engineOptions) error {
 	defer func() { _ = lw.Close() }()
 	logger := newLogger(lw, opts.stderr, opts.level)
 
+	tmpl := prep.Default()
+	if cfg.Prompts.Alert != "" {
+		if tmpl, err = prep.Parse(cfg.Prompts.AlertText); err != nil {
+			return fmt.Errorf("prompts.alert: %w", err)
+		}
+	}
+	ro := opts.runner
+	ro.Store, ro.Log, ro.Template = store, logger, tmpl
+	ro.Command, ro.Model, ro.Args, ro.Timeout = cfg.Runs.Command, cfg.Runs.Model, cfg.Runs.Args, cfg.Runs.Timeout
+	if ro.Now == nil {
+		ro.Now = opts.now
+	}
+	deliver := opts.deliver
+	if deliver == nil {
+		n := &notify.Notifier{Sound: cfg.Notifications.Sound, ConfigPath: cfg.Path, Executable: os.Executable}
+		deliver = n.Deliver
+	}
+
 	e := &engine{
 		cfg:          cfg,
 		store:        store,
@@ -162,6 +210,10 @@ func runEngine(ctx context.Context, opts engineOptions) error {
 		rounds:       make(chan []pollResult, 1),
 		fetchTimeout: opts.fetchTimeout,
 		hooks:        opts.hooks,
+		runner:       runner.New(ro),
+		queue:        runner.NewQueue(cfg.Alerts.SeverityOrder),
+		blocked:      map[string]blockedStart{},
+		deliver:      deliver,
 	}
 	return e.run(ctx, opts, findings)
 }
@@ -196,13 +248,31 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 
 	var wg sync.WaitGroup
 	bgCtx, cancelBg := context.WithCancel(ctx)
+	e.bgCtx, e.wg = bgCtx, &wg
 	defer func() {
-		// Cancel outstanding polls and credential commands; their cleanup
-		// is bounded (CredentialWaitDelay), not their remaining budget.
+		// Cancel outstanding polls, credential commands and notification
+		// deliveries; their cleanup is bounded (CredentialWaitDelay,
+		// notify.WaitDelay), not their remaining budget.
 		cancelBg()
 		wg.Wait()
 	}()
-	wg.Go(func() { e.pruneOnce(bgCtx) })
+	// Detached runs are neither signalled nor waited for on shutdown.
+	defer e.runner.Close()
+	api := opts.api
+	if api == nil {
+		api = newEngineAPI()
+	}
+	defer close(api.stopped)
+
+	// Recover run evidence before the rebuilt queue is scheduled and
+	// before pruning starts; items with tracked runs are never pruned.
+	e.recoverRuns()
+	e.schedule()
+	skip := map[string]bool{}
+	for _, id := range e.runner.TrackedIDs() {
+		skip[id] = true
+	}
+	wg.Go(func() { e.pruneOnce(bgCtx, skip) })
 
 	// The startup round runs in the background like every later round.
 	e.startRound(bgCtx, &wg)
@@ -217,6 +287,12 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 		tick := time.NewTicker(opts.tick)
 		defer tick.Stop()
 		tickC = tick.C
+	}
+	monitorC := opts.monitorC
+	if monitorC == nil {
+		monitor := time.NewTicker(runner.MonitorInterval)
+		defer monitor.Stop()
+		monitorC = monitor.C
 	}
 
 	for {
@@ -234,6 +310,7 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 			e.inFlight = false
 			e.refresh()
 			e.reconcile()
+			e.schedule()
 			call(e.hooks.roundApplied)
 		case <-pollC:
 			if e.inFlight {
@@ -246,7 +323,23 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 			// Timer ticks only use the snapshots of already applied rounds.
 			e.refresh()
 			e.reconcile()
+			e.schedule()
 			call(e.hooks.ticked)
+		case w := <-e.runner.WaitC():
+			e.handleCompletions(e.runner.HandleWait(w))
+			e.schedule()
+		case o := <-e.runner.OwnershipC():
+			// Ownership checks of re-attached runs run off the loop.
+			e.handleCompletions(e.runner.HandleOwnership(o))
+			e.schedule()
+		case <-monitorC:
+			e.handleCompletions(e.runner.Check())
+			e.schedule()
+			call(e.hooks.monitored)
+		case c := <-api.cmds:
+			err := e.command(c)
+			e.schedule()
+			c.reply <- err
 		}
 	}
 }
@@ -347,8 +440,27 @@ func (e *engine) refresh() {
 	}
 }
 
+// removed reports whether an item is being deleted by the pruner or its
+// directory no longer exists.
+func (e *engine) removed(id string) bool {
+	if _, ok := e.pruning.Load(id); ok {
+		return true
+	}
+	_, err := os.Lstat(e.store.ItemDir(id))
+	return errors.Is(err, fs.ErrNotExist)
+}
+
 func (e *engine) load(id string, st item.Stamp) {
 	l, err := e.store.Load(id)
+	if err != nil && e.removed(id) {
+		// Deleted concurrently (retention pruning): forget it without
+		// reporting it as unreadable. A still existing item is loaded
+		// again by the next refresh.
+		delete(e.items, id)
+		delete(e.unreadable, id)
+		e.log.Debug("item removed while loading", "item_id", id, "error", err)
+		return
+	}
 	if err != nil {
 		delete(e.items, id)
 		_, known := e.unreadable[id]
@@ -392,12 +504,22 @@ func (e *engine) initMarkdown(id string, c *cachedItem) {
 	}
 }
 
-func (e *engine) reconcile() {
+func (e *engine) reconcile() { _, _, _ = e.reconcileWith(nil) }
+
+// reconcileWith runs a reconciliation pass with the given runner or user
+// events (plus runner events pending from failed writes) and applies its
+// result. It returns the result and the write errors by item ID, or an
+// error if the pass could not run; runner events are then retained for the
+// next pass, user requests are not.
+func (e *engine) reconcileWith(events []reconcile.Event) (reconcile.Result, map[string]error, error) {
 	counters, err := e.store.Counters()
 	if err != nil {
 		e.log.Error("read item counters; skipping reconciliation", "error", err)
-		return
+		e.pending = append(e.pending, runnerEvents(events)...)
+		return reconcile.Result{}, nil, fmt.Errorf("read item counters: %w", err)
 	}
+	events = append(e.pending, events...)
+	e.pending = nil
 	in := reconcile.Input{
 		Counters: counters,
 		Now:      e.now(),
@@ -414,13 +536,43 @@ func (e *engine) reconcile() {
 	for _, name := range slices.Sorted(maps.Keys(e.status)) {
 		in.Snapshots = append(in.Snapshots, e.status[name].snapshot)
 	}
-	e.apply(reconcile.Reconcile(in))
+	in.Events = events
+	res := reconcile.Reconcile(in)
+	failed := e.apply(res)
+	for _, ev := range runnerEvents(events) {
+		if failed[ev.ItemID] != nil {
+			e.pending = append(e.pending, ev)
+		}
+	}
+	return res, failed, nil
 }
 
-func (e *engine) apply(res reconcile.Result) {
+// runnerEvents returns the runner events of events. Unlike user requests,
+// they report facts that must eventually be applied.
+func runnerEvents(events []reconcile.Event) []reconcile.Event {
+	var out []reconcile.Event
+	for _, ev := range events {
+		switch ev.Kind {
+		case reconcile.EventRunStarted, reconcile.EventRunFinished, reconcile.EventRunInterrupted, reconcile.EventRunRecovered:
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// apply persists the changes of a reconciliation result and executes the
+// effects of the successfully persisted items. It returns the write errors
+// by item ID.
+func (e *engine) apply(res reconcile.Result) map[string]error {
+	failed := map[string]error{}
 	for _, ch := range res.Changes {
 		if err := e.applyChange(ch); err != nil {
+			failed[ch.ItemID] = err
 			e.log.Error("persist item change", "item_id", ch.ItemID, "source", ch.Item.Source.Name, "error", err)
+			// Reload: the item may be partially written.
+			if st, err := e.store.Stamp(ch.ItemID); err == nil {
+				e.load(ch.ItemID, st)
+			}
 			continue
 		}
 		for _, t := range ch.Transitions() {
@@ -432,12 +584,27 @@ func (e *engine) apply(res reconcile.Result) {
 		}
 	}
 	for _, ef := range res.Effects {
-		e.log.Info("intent recorded; the runner is not available in this version", "intent", string(ef.Kind),
-			"item_id", ef.ItemID, "run", ef.Run, "reason", string(ef.Reason))
+		// Effects of items whose change was not persisted are stale.
+		if failed[ef.ItemID] != nil {
+			continue
+		}
+		switch ef.Kind {
+		case reconcile.EffectEnqueue:
+			e.enqueue(ef.ItemID)
+		case reconcile.EffectCancelQueued:
+			if e.queue.Remove(ef.ItemID) {
+				e.log.Info("queued run cancelled", "item_id", ef.ItemID, "run", ef.Run)
+			}
+		case reconcile.EffectCancelRunning:
+			e.runner.Cancel(ef.ItemID, ef.Run)
+		case reconcile.EffectNotify:
+			e.notifyOutcome(ef)
+		}
 	}
 	for _, ig := range res.Ignored {
 		e.log.Warn("event ignored", "item_id", ig.Event.ItemID, "event", string(ig.Event.Kind), "reason", ig.Reason)
 	}
+	return failed
 }
 
 func (e *engine) applyChange(ch reconcile.Change) error {
@@ -448,6 +615,13 @@ func (e *engine) applyChange(ch reconcile.Change) error {
 		}
 		e.writeMarkdown(ch)
 		return nil
+	}
+	// Run metadata is written first so that the item never references
+	// runs whose evidence was not persisted.
+	for _, r := range ch.Runs {
+		if err := e.store.WriteRun(ch.ItemID, r); err != nil {
+			return fmt.Errorf("write run %d: %w", r.Number, err)
+		}
 	}
 	if _, err := e.store.Update(ch.ItemID, func(disk *item.Item) error {
 		*disk = *mergeChange(disk, ch)
@@ -460,11 +634,6 @@ func (e *engine) applyChange(ch reconcile.Change) error {
 			return fmt.Errorf("write alert.json: %w", err)
 		}
 		e.writeMarkdown(ch)
-	}
-	for _, r := range ch.Runs {
-		if err := e.store.WriteRun(ch.ItemID, r); err != nil {
-			return fmt.Errorf("write run %d: %w", r.Number, err)
-		}
 	}
 	return nil
 }
@@ -527,7 +696,8 @@ func mergeChange(disk *item.Item, ch reconcile.Change) *item.Item {
 }
 
 // pruneOnce runs retention pruning once, using the already held engine lock.
-func (e *engine) pruneOnce(ctx context.Context) {
+// Items in skip (with runs tracked on startup) are never pruned.
+func (e *engine) pruneOnce(ctx context.Context, skip map[string]bool) {
 	cutoff := e.now().Add(-e.cfg.Retention.DoneAfter)
 	cands, err := e.store.PruneCandidates(cutoff)
 	if err != nil {
@@ -539,7 +709,12 @@ func (e *engine) pruneOnce(ctx context.Context) {
 		if ctx.Err() != nil {
 			break
 		}
+		if skip[c.ID] {
+			continue
+		}
+		e.pruning.Store(c.ID, struct{}{})
 		ok, err := e.store.PruneItem(c.ID, cutoff)
+		e.pruning.Delete(c.ID)
 		if err != nil {
 			e.log.Error("prune item", "item_id", c.ID, "error", err)
 			continue

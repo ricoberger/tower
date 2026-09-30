@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -118,9 +119,7 @@ sources:
     auth:
       type: bearer
       token: $TOWER_TEST_TOKEN
-runs:
-  command: sh
-` + extra
+` + fakeRuns(t, stateDir) + extra
 	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -294,6 +293,47 @@ alerts:
 	e = testEnv(dir2, map[string]string{"TOWER_TEST_TOKEN": "x"}, time.Now())
 	if code, out, stderr := runCLI(t, e, "--config", cfg2, "config", "validate"); code != 0 {
 		t.Fatalf("validate while locked: %d %s %s", code, out, stderr)
+	}
+}
+
+func TestPromptOverrideValidation(t *testing.T) {
+	dir, cfgPath, _, stateDir := setup(t, "prompts:\n  alert: ./prompt.tmpl\n")
+	e := testEnv(dir, map[string]string{"TOWER_TEST_TOKEN": "x"}, time.Now())
+	tmpl := filepath.Join(dir, "prompt.tmpl")
+
+	// Missing, unparsable and invalid-field overrides fail validation and
+	// startup; the error in the populated previous-report branch counts.
+	for name, c := range map[string]struct{ text, want string }{
+		"missing":      {"", "cannot read the override template"},
+		"unparsable":   {"{{if .RunDir}}", "invalid template"},
+		"branch field": {"{{range .PreviousReports}}{{.Report}}{{end}}", "invalid template: template: prompt:1:28: executing \"prompt\" at <.Report>: can't evaluate field Report"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_ = os.Remove(tmpl)
+			if c.text != "" {
+				if err := os.WriteFile(tmpl, []byte(c.text), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code, out, _ := runCLI(t, e, "--config", cfgPath, "config", "validate")
+			if code != 1 || !strings.Contains(out, "error: prompts.alert: "+c.want) {
+				t.Fatalf("validate: code=%d out=%q", code, out)
+			}
+			code, _, stderr := runCLI(t, e, "--config", cfgPath, "--headless")
+			if code != 1 || !strings.Contains(stderr, "error: prompts.alert: "+c.want) {
+				t.Fatalf("startup: code=%d stderr=%q", code, stderr)
+			}
+			if _, err := os.Stat(stateDir); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("startup with an invalid override touched the state: %v", err)
+			}
+		})
+	}
+
+	if err := os.WriteFile(tmpl, []byte("{{.RunDir}}{{range .PreviousReports}}{{.}}{{end}}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, _ := runCLI(t, e, "--config", cfgPath, "config", "validate"); code != 0 {
+		t.Fatalf("valid override: code=%d out=%q", code, out)
 	}
 }
 
@@ -496,18 +536,19 @@ func TestEngineIntegration(t *testing.T) {
 	defer stop()
 
 	id := "alert-dev-abc123-1"
-	// Created and queued immediately (first poll without waiting).
-	eventually(t, "queued item", func() bool {
+	// Created, queued immediately (first poll without waiting) and started
+	// (the fixture hangs).
+	eventually(t, "preparing item", func() bool {
 		it := readItem(t, stateDir, id)
-		return it != nil && it.State == item.StateQueued
+		return it != nil && it.State == item.StatePreparing
 	})
 	it := readItem(t, stateDir, id)
-	if it.Runs.PendingReason == nil || *it.Runs.PendingReason != item.ReasonAuto || it.Runs.Current != 0 ||
-		it.Title != "KubePodCrashLooping: core/api-1" || len(it.History) != 2 {
+	if it.Runs.PendingReason != nil || it.Runs.Current != 1 ||
+		it.Title != "KubePodCrashLooping: core/api-1" || len(it.History) != 3 || it.History[1].To != item.StateQueued {
 		t.Fatalf("item = %+v", it)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, "items", id, "runs")); !os.IsNotExist(err) {
-		t.Fatal("no run must be launched or fabricated")
+	if _, err := os.Stat(filepath.Join(stateDir, "items", id, "runs", "1", "prompt.md")); err != nil {
+		t.Fatalf("run 1 not started: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(stateDir, "items", id, "alert.json")) // #nosec G304 -- test file
 	if err != nil || !json.Valid(raw) || !strings.Contains(string(raw), "abc123") {
@@ -535,7 +576,7 @@ func TestEngineIntegration(t *testing.T) {
 	// Source failure is nonfatal and visible.
 	writeFixture(t, fixture, "not json")
 	eventually(t, "source failure log", func() bool { return strings.Contains(stderr.String(), "source poll failed") })
-	if readItem(t, stateDir, id).State != item.StateQueued {
+	if readItem(t, stateDir, id).State != item.StatePreparing {
 		t.Fatal("source failure changed the item")
 	}
 
@@ -545,11 +586,12 @@ func TestEngineIntegration(t *testing.T) {
 		it := readItem(t, stateDir, id)
 		return it != nil && it.State == item.StateResolved
 	})
-	// The alert fires again: the resolved item is reopened.
+	// The alert fires again: the resolved item is reopened; its run is
+	// still executing, so no second run is queued.
 	writeFixture(t, fixture, "["+fixtureAlert+"]")
 	eventually(t, "reopened item", func() bool {
 		it := readItem(t, stateDir, id)
-		return it != nil && it.State == item.StateQueued && it.Alert.Occurrences == 2
+		return it != nil && it.State == item.StatePreparing && it.Alert.Occurrences == 2 && it.Runs.Current == 1
 	})
 
 	// A user action written by another process while the engine runs is
@@ -854,7 +896,7 @@ func TestProcessLockAndSignals(t *testing.T) {
 			a := startTower(t, cfgPath, &first)
 			eventually(t, "first engine ready", func() bool {
 				it := readItem(t, stateDir, "alert-dev-abc123-1")
-				return it != nil && it.State == item.StateQueued && strings.Contains(first.String(), "items loaded")
+				return it != nil && it.State == item.StatePreparing && strings.Contains(first.String(), "items loaded")
 			})
 
 			var second syncBuffer
