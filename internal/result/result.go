@@ -125,7 +125,7 @@ func Parse(data []byte) (*Result, error) {
 	if r.Gate.Question, err = requiredText(gate, "gate.question"); err != nil {
 		return nil, err
 	}
-	if v, ok := gate["gate.options"]; ok && !isNull(v) {
+	if v, ok := gate["gate.options"]; ok {
 		if r.Gate.Options, err = stringList("gate.options", v); err != nil {
 			return nil, err
 		}
@@ -272,10 +272,10 @@ func requiredText(obj map[string]json.RawMessage, field string) (string, error) 
 }
 
 // optionalString returns the string value and whether it was provided. A
-// null value counts as omitted.
+// supplied value, including null, must be a string.
 func optionalString(obj map[string]json.RawMessage, field string) (string, bool, error) {
 	v, ok := obj[field]
-	if !ok || isNull(v) {
+	if !ok {
 		return "", false, nil
 	}
 	s, err := str(field, v)
