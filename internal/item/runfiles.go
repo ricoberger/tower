@@ -218,6 +218,58 @@ func (s *Store) ReadRunFile(id string, n int, name string) ([]byte, error) {
 	return data, nil
 }
 
+// StatRunFile returns the file info of a regular run artifact without
+// following symlinks.
+func (s *Store) StatRunFile(id string, n int, name string) (fs.FileInfo, error) {
+	if err := checkIDRun(id, n); err != nil {
+		return nil, err
+	}
+	if err := checkRunFile(name); err != nil {
+		return nil, err
+	}
+	fi, err := s.root.Lstat(runRel(id, n, name))
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	return fi, nil
+}
+
+// ReadRunFileTail reads at most limit bytes from the end of a regular run
+// artifact. It returns the data, the offset of its first byte in the file
+// and the file info observed when it was opened.
+func (s *Store) ReadRunFileTail(id string, n int, name string, limit int64) ([]byte, int64, fs.FileInfo, error) {
+	if err := checkIDRun(id, n); err != nil {
+		return nil, 0, nil, err
+	}
+	if err := checkRunFile(name); err != nil {
+		return nil, 0, nil, err
+	}
+	if limit <= 0 {
+		return nil, 0, nil, errors.New("invalid tail size")
+	}
+	f, err := s.root.OpenFile(runRel(id, n, name), os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, 0, nil, fmt.Errorf("%s is not a regular file", name)
+	}
+	off := max(fi.Size()-limit, 0)
+	data, err := io.ReadAll(io.NewSectionReader(f, off, limit))
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	return data, off, fi, nil
+}
+
 // HasRunFile reports whether a run artifact exists as a regular file (not a
 // symlink).
 func (s *Store) HasRunFile(id string, n int, name string) (bool, error) {

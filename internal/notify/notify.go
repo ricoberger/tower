@@ -1,6 +1,7 @@
 // Package notify delivers macOS desktop notifications for finished
-// preparation runs through terminal-notifier or, when it is not installed,
-// osascript. Content is always passed as process arguments, never as code.
+// preparation runs and failed resume handoffs through terminal-notifier or,
+// when it is not installed, osascript. Content is always passed as process
+// arguments, never as code.
 package notify
 
 import (
@@ -168,6 +169,55 @@ func (n *Notifier) Deliver(ctx context.Context, x Notification) error {
 	if err != nil {
 		return err
 	}
+	return n.run(ctx, path, args)
+}
+
+// TitleResumeFailed is the title of a resume error notification.
+const TitleResumeFailed = "tower — resume failed"
+
+// ErrorCommand returns the delivery executable and arguments of an error
+// notification. Unlike a run notification it has no click action, so a
+// failing command is never offered again as its own remedy.
+func (n *Notifier) ErrorCommand(title, message string) (string, []string, error) {
+	lookPath := n.LookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	message = Truncate(message, MaxMessage)
+	if message == "" {
+		message = " "
+	}
+	if path, err := lookPath("terminal-notifier"); err == nil {
+		args := []string{"-title", title, "-message", message}
+		if n.Sound != "" {
+			args = append(args, "-sound", n.Sound)
+		}
+		return path, args, nil
+	}
+	path, err := lookPath("osascript")
+	if err != nil {
+		return "", nil, errors.New("neither terminal-notifier nor osascript found")
+	}
+	display := "display notification (item 1 of argv) with title (item 2 of argv)"
+	rest := []string{message, title}
+	if n.Sound != "" {
+		display += " sound name (item 3 of argv)"
+		rest = append(rest, n.Sound)
+	}
+	args := append([]string{"-e", "on run argv", "-e", display, "-e", "end run", "--"}, rest...)
+	return path, args, nil
+}
+
+// DeliverError shows an error notification, bounded like Deliver.
+func (n *Notifier) DeliverError(ctx context.Context, title, message string) error {
+	path, args, err := n.ErrorCommand(title, message)
+	if err != nil {
+		return err
+	}
+	return n.run(ctx, path, args)
+}
+
+func (n *Notifier) run(ctx context.Context, path string, args []string) error {
 	timeout := n.Timeout
 	if timeout <= 0 {
 		timeout = Timeout
@@ -191,7 +241,7 @@ func (n *Notifier) Deliver(ctx context.Context, x Notification) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start %s: %w", filepath.Base(path), err)
 	}
-	err = cmd.Wait()
+	err := cmd.Wait()
 	// Descendants may outlive the delivery process (for example holding its
 	// output pipe); the group is always removed once the command ended.
 	_ = killGroup(cmd)

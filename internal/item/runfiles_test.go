@@ -188,3 +188,64 @@ func TestReadRunFileFIFO(t *testing.T) {
 		}
 	}
 }
+
+func TestRunFileTail(t *testing.T) {
+	s := openStore(t)
+	it := newItem(t, key, 1)
+	if err := s.Create(it, nil); err != nil {
+		t.Fatal(err)
+	}
+	run := Run{Number: 1, SessionID: "sid", Reason: ReasonAuto, Skill: "sre-analyze-alert", QueuedAt: t0, Outcome: OutcomeRunning}
+	if err := s.CreateRun(it.ID, run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StatRunFile(it.ID, 1, OutputFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file: %v", err)
+	}
+	if err := s.WriteRunFile(it.ID, 1, OutputFile, []byte("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := s.StatRunFile(it.ID, 1, OutputFile)
+	if err != nil || fi.Size() != 10 {
+		t.Fatalf("stat: %v", err)
+	}
+	data, off, fi, err := s.ReadRunFileTail(it.ID, 1, OutputFile, 4)
+	if err != nil || string(data) != "6789" || off != 6 || fi.Size() != 10 {
+		t.Fatalf("tail = %q %d %v", data, off, err)
+	}
+	data, off, _, err = s.ReadRunFileTail(it.ID, 1, OutputFile, 100)
+	if err != nil || string(data) != "0123456789" || off != 0 {
+		t.Fatalf("whole = %q %d %v", data, off, err)
+	}
+	if _, _, _, err := s.ReadRunFileTail(it.ID, 1, OutputFile, 0); err == nil {
+		t.Error("zero limit accepted")
+	}
+	if _, _, _, err := s.ReadRunFileTail(it.ID, 1, "../item.json", 10); err == nil {
+		t.Error("unknown artifact name accepted")
+	}
+
+	// Symlinks and non-regular files are rejected.
+	dir := filepath.Join(s.ItemDir(it.ID), "runs", "1")
+	outside := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(outside, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, StderrFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StatRunFile(it.ID, 1, StderrFile); err == nil {
+		t.Error("StatRunFile followed a symlink")
+	}
+	if _, _, _, err := s.ReadRunFileTail(it.ID, 1, StderrFile, 10); err == nil {
+		t.Error("ReadRunFileTail followed a symlink")
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, ReportFile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.ReadRunFileTail(it.ID, 1, ReportFile, 10); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Errorf("FIFO: %v", err)
+	}
+	if _, err := s.StatRunFile(it.ID, 1, ReportFile); err == nil {
+		t.Error("StatRunFile accepted a FIFO")
+	}
+}
