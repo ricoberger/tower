@@ -119,9 +119,7 @@ sources:
     auth:
       type: bearer
       token: $TOWER_TEST_TOKEN
-runs:
-  command: sh
-` + extra
+` + fakeRuns(t, stateDir) + extra
 	if err := os.WriteFile(cfgPath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -538,18 +536,19 @@ func TestEngineIntegration(t *testing.T) {
 	defer stop()
 
 	id := "alert-dev-abc123-1"
-	// Created and queued immediately (first poll without waiting).
-	eventually(t, "queued item", func() bool {
+	// Created, queued immediately (first poll without waiting) and started
+	// (the fixture hangs).
+	eventually(t, "preparing item", func() bool {
 		it := readItem(t, stateDir, id)
-		return it != nil && it.State == item.StateQueued
+		return it != nil && it.State == item.StatePreparing
 	})
 	it := readItem(t, stateDir, id)
-	if it.Runs.PendingReason == nil || *it.Runs.PendingReason != item.ReasonAuto || it.Runs.Current != 0 ||
-		it.Title != "KubePodCrashLooping: core/api-1" || len(it.History) != 2 {
+	if it.Runs.PendingReason != nil || it.Runs.Current != 1 ||
+		it.Title != "KubePodCrashLooping: core/api-1" || len(it.History) != 3 || it.History[1].To != item.StateQueued {
 		t.Fatalf("item = %+v", it)
 	}
-	if _, err := os.Stat(filepath.Join(stateDir, "items", id, "runs")); !os.IsNotExist(err) {
-		t.Fatal("no run must be launched or fabricated")
+	if _, err := os.Stat(filepath.Join(stateDir, "items", id, "runs", "1", "prompt.md")); err != nil {
+		t.Fatalf("run 1 not started: %v", err)
 	}
 	raw, err := os.ReadFile(filepath.Join(stateDir, "items", id, "alert.json")) // #nosec G304 -- test file
 	if err != nil || !json.Valid(raw) || !strings.Contains(string(raw), "abc123") {
@@ -577,7 +576,7 @@ func TestEngineIntegration(t *testing.T) {
 	// Source failure is nonfatal and visible.
 	writeFixture(t, fixture, "not json")
 	eventually(t, "source failure log", func() bool { return strings.Contains(stderr.String(), "source poll failed") })
-	if readItem(t, stateDir, id).State != item.StateQueued {
+	if readItem(t, stateDir, id).State != item.StatePreparing {
 		t.Fatal("source failure changed the item")
 	}
 
@@ -587,11 +586,12 @@ func TestEngineIntegration(t *testing.T) {
 		it := readItem(t, stateDir, id)
 		return it != nil && it.State == item.StateResolved
 	})
-	// The alert fires again: the resolved item is reopened.
+	// The alert fires again: the resolved item is reopened; its run is
+	// still executing, so no second run is queued.
 	writeFixture(t, fixture, "["+fixtureAlert+"]")
 	eventually(t, "reopened item", func() bool {
 		it := readItem(t, stateDir, id)
-		return it != nil && it.State == item.StateQueued && it.Alert.Occurrences == 2
+		return it != nil && it.State == item.StatePreparing && it.Alert.Occurrences == 2 && it.Runs.Current == 1
 	})
 
 	// A user action written by another process while the engine runs is
@@ -896,7 +896,7 @@ func TestProcessLockAndSignals(t *testing.T) {
 			a := startTower(t, cfgPath, &first)
 			eventually(t, "first engine ready", func() bool {
 				it := readItem(t, stateDir, "alert-dev-abc123-1")
-				return it != nil && it.State == item.StateQueued && strings.Contains(first.String(), "items loaded")
+				return it != nil && it.State == item.StatePreparing && strings.Contains(first.String(), "items loaded")
 			})
 
 			var second syncBuffer
