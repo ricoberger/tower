@@ -23,9 +23,10 @@ const (
 	ProgressTailBytes = 256 << 10
 	// StderrLines is the number of stderr.log lines shown for a failed run.
 	StderrLines = 20
-	// StderrLineBytes bounds how much of each shown stderr.log line is
-	// read; longer lines are shown truncated with a marker.
-	StderrLineBytes = 4 << 10
+	// StderrTailMaxBytes bounds the content of the shown stderr.log lines,
+	// like every other artifact read. The lines are shown in full; when
+	// they are larger together, the preview shows an error instead.
+	StderrTailMaxBytes = item.MaxRunFileSize
 	// scanChunk is the block size of the backward line scan.
 	scanChunk = 64 << 10
 )
@@ -96,8 +97,8 @@ func loadArtifacts(files RunFiles, key previewKey) artifacts {
 }
 
 // stderrTail returns the last StderrLines lines of stderr.log, including
-// blank lines. The file is scanned backwards, so the lines are exact however
-// long they are, while at most StderrLineBytes of each line are kept.
+// blank lines, with their full content. The file is scanned backwards, so
+// the lines are exact however long the earlier content is.
 func stderrTail(files RunFiles, id string, run int) ([]string, error) {
 	f, err := files.OpenRunFile(id, run, item.StderrFile)
 	if err != nil {
@@ -108,13 +109,14 @@ func stderrTail(files RunFiles, id string, run int) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return lastLines(f, fi.Size(), StderrLines, StderrLineBytes)
+	return lastLines(f, fi.Size(), StderrLines, StderrTailMaxBytes)
 }
 
 // lastLines returns the last n lines of the first size bytes of r. A final
-// newline terminates the last line and does not start another one. Lines
-// longer than maxLine bytes are truncated and marked.
-func lastLines(r io.ReaderAt, size int64, n, maxLine int) ([]string, error) {
+// newline terminates the last line and does not start another one. The
+// lines are returned in full; if they are larger than maxBytes together,
+// an error is returned instead of partial lines.
+func lastLines(r io.ReaderAt, size int64, n int, maxBytes int64) ([]string, error) {
 	if size <= 0 || n <= 0 {
 		return []string{}, nil
 	}
@@ -126,8 +128,9 @@ func lastLines(r io.ReaderAt, size int64, n, maxLine int) ([]string, error) {
 	if last[0] == '\n' {
 		end--
 	}
-	// starts collects line start offsets from the last line backwards.
-	starts := []int64{}
+	// first is the start of the earliest selected line; found counts the
+	// line starts seen from the last line backwards.
+	first, found := int64(0), 0
 	buf := make([]byte, scanChunk)
 	pos := end
 scan:
@@ -139,34 +142,23 @@ scan:
 		}
 		for i := len(chunk) - 1; i >= 0; i-- {
 			if chunk[i] == '\n' {
-				starts = append(starts, lo+int64(i)+1)
-				if len(starts) == n {
+				found++
+				if found == n {
+					first = lo + int64(i) + 1
 					break scan
 				}
 			}
 		}
 		pos = lo
 	}
-	if len(starts) < n {
-		starts = append(starts, 0)
+	if end-first > maxBytes {
+		return nil, fmt.Errorf("the last %d lines are larger than %d bytes; open the log with l", n, maxBytes)
 	}
-	lines := make([]string, len(starts))
-	stop := end
-	for i, start := range starts {
-		length := stop - start
-		keep := min(length, int64(maxLine))
-		b := make([]byte, keep)
-		if _, err := r.ReadAt(b, start); err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
-		}
-		line := string(b)
-		if length > keep {
-			line += fmt.Sprintf(" … (%d more bytes)", length-keep)
-		}
-		lines[len(starts)-1-i] = line
-		stop = start - 1
+	data := make([]byte, end-first)
+	if _, err := r.ReadAt(data, first); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
 	}
-	return lines, nil
+	return strings.Split(string(data), "\n"), nil
 }
 
 // loadProgress refreshes the progress line of an executing run. The file is

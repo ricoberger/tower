@@ -267,8 +267,8 @@ then oldest first. Unseen items are bold. The preview shows the selected
 item: metadata, summary, root cause, the gate question with its options,
 proposed actions, assumptions and the full `report.md`. While a run executes,
 it shows the elapsed time and the latest Copilot message; for a failed run,
-the error and the last 20 lines of `stderr.log` (lines longer than 4 KiB are
-truncated).
+the error and the last 20 lines of `stderr.log` in full (if those lines
+together exceed 16 MiB, the preview says so instead; open the log with `l`).
 
 The latest Copilot message comes from the last 256 KiB of the run's
 `output.jsonl`; the file is only reread when its size or modification time

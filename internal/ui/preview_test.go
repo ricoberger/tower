@@ -156,13 +156,13 @@ func TestStderrTailBoundary(t *testing.T) {
 	if err != nil || len(lines) != 20 || lines[0] != "old diagnostic" {
 		t.Fatalf("19 blank lines: %v %q", err, lines)
 	}
-	// Lines far beyond any fixed byte window still count as lines; long
-	// ones are truncated with a marker instead of disappearing.
+	// Lines far beyond any fixed byte window still count as lines and are
+	// shown in full, including a diagnostic at their end.
 	huge := strings.Repeat("y", 300<<10)
 	var long strings.Builder
 	long.WriteString("before\n")
 	for i := range 18 {
-		fmt.Fprintf(&long, "%s%02d\n", huge, i)
+		fmt.Fprintf(&long, "%s diagnostic %02d\n", huge, i)
 	}
 	long.WriteString("last")
 	f.writeRunFile(id, 1, item.StderrFile, long.String())
@@ -170,9 +170,18 @@ func TestStderrTailBoundary(t *testing.T) {
 	if err != nil || len(lines) != 20 || lines[0] != "before" || lines[19] != "last" {
 		t.Fatalf("long lines: %v %d lines", err, len(lines))
 	}
-	marker := fmt.Sprintf(" … (%d more bytes)", len(huge)+2-StderrLineBytes)
-	if lines[1] != strings.Repeat("y", StderrLineBytes)+marker {
-		t.Fatalf("long line not truncated with a marker: %q", lines[1][StderrLineBytes-5:])
+	for i, l := range lines[1:19] {
+		if l != fmt.Sprintf("%s diagnostic %02d", huge, i) {
+			t.Fatalf("long line %d not complete: ...%q", i, l[max(len(l)-40, 0):])
+		}
+	}
+	// Selected lines larger than the read bound together are an error, not
+	// partial content.
+	if _, err := lastLines(strings.NewReader(long.String()), int64(long.Len()), 20, 1<<20); err == nil || !strings.Contains(err.Error(), "larger than") {
+		t.Fatalf("oversized tail: %v", err)
+	}
+	if lines, err := lastLines(strings.NewReader(long.String()), int64(long.Len()), 1, 4); err != nil || !slices.Equal(lines, []string{"last"}) {
+		t.Fatalf("bound applies to the selected lines only: %v %q", err, lines)
 	}
 	for _, tc := range []struct {
 		data string
@@ -194,7 +203,7 @@ func TestStderrTailBoundary(t *testing.T) {
 	for i := range 40 {
 		fmt.Fprintf(&chunked, "%d:%s\n", i, strings.Repeat("z", scanChunk/3+i))
 	}
-	lines, err = lastLines(strings.NewReader(chunked.String()), int64(chunked.Len()), 25, scanChunk)
+	lines, err = lastLines(strings.NewReader(chunked.String()), int64(chunked.Len()), 25, 1<<30)
 	if err != nil || len(lines) != 25 || !strings.HasPrefix(lines[0], "15:") || !strings.HasPrefix(lines[24], "39:") || len(lines[24]) != len("39:")+scanChunk/3+39 {
 		t.Fatalf("chunked: %v %d", err, len(lines))
 	}
