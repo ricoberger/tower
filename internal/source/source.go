@@ -96,12 +96,12 @@ func DecodeAlert(sourceName string, raw json.RawMessage) (Alert, error) {
 		return Alert{}, err
 	}
 	if !ValidFingerprint(a.Fingerprint) {
-		return Alert{}, errors.New("missing or invalid fingerprint")
+		return Alert{}, errInvalidFingerprint
 	}
 	switch a.Status.State {
 	case StateActive, StateSuppressed, StateUnprocessed:
 	default:
-		return Alert{}, fmt.Errorf("alert %s: unsupported status.state", a.Fingerprint)
+		return Alert{}, fmt.Errorf("alert %s: %w", a.Fingerprint, errUnsupportedState)
 	}
 	out := Alert{
 		Source:       sourceName,
@@ -129,6 +129,24 @@ func DecodeAlert(sourceName string, raw json.RawMessage) (Alert, error) {
 	return out, nil
 }
 
+// Decoding failure categories. Their messages never contain response data.
+var (
+	errInvalidFingerprint   = errors.New("missing or invalid fingerprint")
+	errUnsupportedState     = errors.New("unsupported status.state")
+	errDuplicateFingerprint = errors.New("duplicate fingerprint")
+	errNotArray             = errors.New("expected a JSON array")
+)
+
+// alertDecodeError is the failure to decode the alert at index of a snapshot.
+type alertDecodeError struct {
+	index int
+	err   error
+}
+
+func (e *alertDecodeError) Error() string { return fmt.Sprintf("decode alert %d: %v", e.index, e.err) }
+
+func (e *alertDecodeError) Unwrap() error { return e.err }
+
 // DecodeSnapshot decodes a JSON array in the GET /api/v2/alerts format.
 func DecodeSnapshot(sourceName string, data []byte) ([]Alert, error) {
 	var raws []json.RawMessage
@@ -136,17 +154,17 @@ func DecodeSnapshot(sourceName string, data []byte) ([]Alert, error) {
 		return nil, fmt.Errorf("decode alerts: %w", err)
 	}
 	if raws == nil {
-		return nil, errors.New("decode alerts: expected a JSON array")
+		return nil, fmt.Errorf("decode alerts: %w", errNotArray)
 	}
 	alerts := make([]Alert, 0, len(raws))
 	seen := map[string]bool{}
 	for i, raw := range raws {
 		a, err := DecodeAlert(sourceName, raw)
 		if err != nil {
-			return nil, fmt.Errorf("decode alert %d: %w", i, err)
+			return nil, &alertDecodeError{index: i, err: err}
 		}
 		if seen[a.Fingerprint] {
-			return nil, fmt.Errorf("decode alert %d: duplicate fingerprint %s", i, a.Fingerprint)
+			return nil, &alertDecodeError{index: i, err: fmt.Errorf("%w %s", errDuplicateFingerprint, a.Fingerprint)}
 		}
 		seen[a.Fingerprint] = true
 		alerts = append(alerts, a)

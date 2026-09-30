@@ -503,6 +503,8 @@ func TestInterpolationInConfig(t *testing.T) {
 		"SEV":     "critical",
 		"TOKEN":   "tok-sentinel",
 		"RECEIVE": "incident",
+		// The instance name is the injected value, JSON-escaped.
+		"GRAFANA_INSTANCES": `{"x\"\nbogus: 1\n": {"url": "https://g"}}`,
 	}
 	cfg := mustLoad(t, `
 state_dir: $SD
@@ -592,7 +594,7 @@ func TestCredentialCommandsPreserved(t *testing.T) {
       type: basic
       username: u
       password_command: '`+passCmd+`'
-`, map[string]string{"HOME": "/h"})
+`, map[string]string{"HOME": "/h", "GRAFANA_INSTANCES": `{"g": {"url": "https://grafana.example.com"}}`})
 	if got := *cfg.Sources[1].Auth.TokenCommand; got != tokenCmd {
 		t.Errorf("token_command = %q", got)
 	}
@@ -648,7 +650,8 @@ runs:
 func TestPathNormalization(t *testing.T) {
 	// Run from a different working directory than the config directory.
 	t.Chdir(t.TempDir())
-	env := map[string]string{"HOME": "/home/u", "SUB": "sub", "TILDE": "~/fromenv", "HOMEREF": "$HOME"}
+	env := map[string]string{"HOME": "/home/u", "SUB": "sub", "TILDE": "~/fromenv", "HOMEREF": "$HOME",
+		"GRAFANA_INSTANCES": `{"g": {"url": "https://g"}, "~/g": {"url": "https://tilde"}}`}
 	path := writeConfig(t, `
 state_dir: ./state
 editor: ./bin/ed
@@ -848,10 +851,7 @@ func TestValidationBoundaries(t *testing.T) {
 }
 
 func TestAlertmanagerSources(t *testing.T) {
-	// Literal grafana_instance references are accepted without
-	// $GRAFANA_INSTANCES (absent or invalid).
-	for _, env := range []map[string]string{{}, {"GRAFANA_INSTANCES": "not json"}} {
-		cfg, report := load(t, `
+	cfg, report := load(t, `
 state_dir: /s
 sources:
   - name: grafana
@@ -870,28 +870,28 @@ sources:
     receiver: ".*"
 prompts:
   alert: /does/not/exist.tmpl
-`, env)
-		if !report.OK() {
-			t.Fatalf("errors = %v", report.Errors)
-		}
-		if cfg.Sources[0].URL != nil || cfg.Sources[0].Auth != nil {
-			t.Error("omitted url/auth must stay nil")
-		}
-		if cfg.Sources[1].URL == nil || cfg.Sources[1].Auth == nil {
-			t.Error("explicit url/auth must be kept")
-		}
-		if len(report.Warnings) != 2 || !hasMessage(report.Warnings, "sources[1]") || !hasMessage(report.Warnings, "sources[2]") ||
-			!hasMessage(report.Warnings, "may stop as blocked") {
-			t.Errorf("warnings = %v", report.Warnings)
-		}
+`, map[string]string{"GRAFANA_INSTANCES": `{"prod": {"url": "https://grafana.example.com", "auth": {"tokenCommand": "echo t"}}}`})
+	if !report.OK() {
+		t.Fatalf("errors = %v", report.Errors)
+	}
+	if cfg.Sources[0].URL != nil || cfg.Sources[0].Auth != nil {
+		t.Error("omitted url/auth must stay nil")
+	}
+	if cfg.Sources[1].URL == nil || cfg.Sources[1].Auth == nil {
+		t.Error("explicit url/auth must be kept")
+	}
+	// The missing-instance warning applies to both endpoint variants.
+	if len(report.Warnings) != 2 || !hasMessage(report.Warnings, "sources[1]") || !hasMessage(report.Warnings, "sources[2]") ||
+		!hasMessage(report.Warnings, "may stop as blocked") {
+		t.Errorf("warnings = %v", report.Warnings)
 	}
 	// An explicit reference to $GRAFANA_INSTANCES obeys the unset rule.
-	_, report := load(t, "state_dir: /s\nsources:\n  - {name: a, type: file, path: x, grafana_instance: $GRAFANA_INSTANCES}\n", map[string]string{})
+	_, report = load(t, "state_dir: /s\nsources:\n  - {name: a, type: file, path: x, grafana_instance: $GRAFANA_INSTANCES}\n", map[string]string{})
 	if !hasMessage(report.Errors, "GRAFANA_INSTANCES") {
 		t.Errorf("errors = %v", report.Errors)
 	}
 	// An interpolated prompt override path is accepted without being read.
-	cfg := mustLoad(t, minimalSources+"state_dir: /s\nprompts:\n  alert: $P/x.tmpl\n", map[string]string{"P": "/nope"})
+	cfg = mustLoad(t, minimalSources+"state_dir: /s\nprompts:\n  alert: $P/x.tmpl\n", map[string]string{"P": "/nope"})
 	if cfg.Prompts.Alert != "/nope/x.tmpl" {
 		t.Errorf("prompts.alert = %q", cfg.Prompts.Alert)
 	}

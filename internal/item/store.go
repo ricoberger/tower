@@ -27,6 +27,7 @@ const (
 	itemsDir     = "items"
 	itemFile     = "item.yaml"
 	alertFile    = "alert.json"
+	markdownFile = "alert.md"
 	runsDir      = "runs"
 	metaFile     = "meta.yaml"
 	lockFile     = ".lock"
@@ -461,6 +462,63 @@ func (s *Store) WriteRawAlert(id string, raw json.RawMessage) error {
 	}
 	defer unlock()
 	return s.writeAtomic(itemRel(id, alertFile), raw)
+}
+
+// WriteAlertMarkdown replaces alert.md of an existing, readable item. It
+// never creates the item directory and never touches item.yaml.
+func (s *Store) WriteAlertMarkdown(id string, md []byte) error {
+	_, err := s.writeMarkdown(id, md, true)
+	return err
+}
+
+// InitAlertMarkdown writes alert.md of an existing, readable item only if it
+// does not exist yet. It reports whether the file was written. An existing
+// alert.md is never replaced, and no other file of the item is changed.
+func (s *Store) InitAlertMarkdown(id string, md []byte) (bool, error) {
+	return s.writeMarkdown(id, md, false)
+}
+
+// RemoveAlertMarkdown removes alert.md of an item (e.g. when it could not be
+// updated), so that it is initialized again from alert.json.
+func (s *Store) RemoveAlertMarkdown(id string) error {
+	if _, _, err := ParseID(id); err != nil {
+		return err
+	}
+	unlock, err := s.lockItem(id)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.root.Remove(itemRel(id, markdownFile)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) writeMarkdown(id string, md []byte, replace bool) (bool, error) {
+	if _, _, err := ParseID(id); err != nil {
+		return false, err
+	}
+	unlock, err := s.lockItem(id)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
+	// Only readable items get Markdown; corrupt state is never touched.
+	if _, err := s.readItem(id); err != nil {
+		return false, err
+	}
+	if !replace {
+		if _, err := s.root.Lstat(itemRel(id, markdownFile)); err == nil {
+			return false, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+	}
+	if err := s.writeAtomic(itemRel(id, markdownFile), md); err != nil {
+		return false, fmt.Errorf("write %s: %w", markdownFile, err)
+	}
+	return true, nil
 }
 
 // WriteRun writes runs/<n>/meta.yaml of an existing item.
