@@ -21,6 +21,7 @@ import (
 	"github.com/ricoberger/tower/internal/reconcile"
 	"github.com/ricoberger/tower/internal/runner"
 	"github.com/ricoberger/tower/internal/source"
+	"github.com/ricoberger/tower/internal/ui"
 )
 
 const (
@@ -60,6 +61,15 @@ type engineOptions struct {
 	// (tests).
 	monitorC <-chan time.Time
 	runner   runner.Options
+
+	// feed receives a snapshot of the applied state after every loop
+	// iteration (TUI mode; optional).
+	feed *ui.Feed
+	// started is called once the instance lock is held and the engine is
+	// about to enter its loop (optional).
+	started func()
+	// mode names the frontend in the startup log line.
+	mode string
 }
 
 // engineHooks are called by the engine loop (tests only).
@@ -136,7 +146,7 @@ type engine struct {
 	wg    *sync.WaitGroup
 }
 
-// runEngine runs the headless engine until ctx is cancelled.
+// runEngine runs the engine until ctx is cancelled.
 func runEngine(ctx context.Context, opts engineOptions) error {
 	cfg := opts.cfg
 	if opts.now == nil {
@@ -219,7 +229,11 @@ func runEngine(ctx context.Context, opts engineOptions) error {
 }
 
 func (e *engine) run(ctx context.Context, opts engineOptions, findings config.ExecutableFindings) error {
-	e.log.Info("tower engine starting (headless)", "state_dir", e.store.Dir())
+	mode := opts.mode
+	if mode == "" {
+		mode = "headless"
+	}
+	e.log.Info("tower engine starting ("+mode+")", "state_dir", e.store.Dir())
 
 	if findings.GhosttyCommand != "" {
 		e.log.Warn(findings.GhosttyCommand)
@@ -295,7 +309,10 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 		monitorC = monitor.C
 	}
 
+	e.publish(opts.feed)
+	call(opts.started)
 	for {
+		e.publish(opts.feed)
 		select {
 		case <-ctx.Done():
 			e.log.Info("tower engine stopping")
@@ -342,6 +359,35 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 			c.reply <- err
 		}
 	}
+}
+
+// publish hands an independent copy of the applied state to the UI. It runs
+// on the engine loop only.
+func (e *engine) publish(feed *ui.Feed) {
+	if feed == nil {
+		return
+	}
+	snap := ui.Snapshot{
+		Unreadable:  len(e.unreadable),
+		Running:     e.runner.Busy(),
+		Concurrency: e.cfg.Runs.Concurrency,
+		Queued:      e.queue.Len(),
+	}
+	for _, c := range e.items {
+		runs := make([]item.Run, len(c.loaded.Runs))
+		for i, r := range c.loaded.Runs {
+			runs[i] = r.Clone()
+		}
+		snap.Items = append(snap.Items, ui.ItemView{Item: c.loaded.Item.Clone(), Runs: runs})
+	}
+	for _, src := range e.sources {
+		h := ui.SourceHealth{Name: src.Name()}
+		if st := e.status[src.Name()]; st != nil {
+			h.LastSuccess, h.LastErr = st.lastSuccess, st.lastErr
+		}
+		snap.Sources = append(snap.Sources, h)
+	}
+	feed.Publish(snap)
 }
 
 // startRound polls all sources concurrently in the background, one goroutine

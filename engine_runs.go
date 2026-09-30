@@ -32,6 +32,9 @@ var (
 	ErrItemDone = errors.New("the item is already done")
 	// ErrEngineStopped is returned when the engine is not running.
 	ErrEngineStopped = errors.New("the engine is not running")
+	// ErrPollInProgress rejects a poll request while a poll round is still
+	// running.
+	ErrPollInProgress = errors.New("a poll is already in progress")
 )
 
 // ManualRunNotAllowedError rejects a manual run in a state that does not
@@ -49,6 +52,7 @@ type apiCommandKind int
 const (
 	apiManualRun apiCommandKind = iota
 	apiDismiss
+	apiPoll
 )
 
 type apiCommand struct {
@@ -83,6 +87,13 @@ func (a *engineAPI) Dismiss(ctx context.Context, itemID string) error {
 	return a.do(ctx, apiDismiss, itemID)
 }
 
+// PollNow starts a poll round of all sources. It returns ErrPollInProgress
+// while a round is still running; the round's result is applied by the
+// engine loop like every scheduled round.
+func (a *engineAPI) PollNow(ctx context.Context) error {
+	return a.do(ctx, apiPoll, "")
+}
+
 func (a *engineAPI) do(ctx context.Context, kind apiCommandKind, id string) error {
 	c := apiCommand{kind: kind, id: id, reply: make(chan error, 1)}
 	select {
@@ -110,6 +121,13 @@ type blockedStart struct {
 
 // command processes an API request on the engine loop.
 func (e *engine) command(c apiCommand) error {
+	if c.kind == apiPoll {
+		if e.inFlight {
+			return ErrPollInProgress
+		}
+		e.startRound(e.bgCtx, e.wg)
+		return nil
+	}
 	e.refresh()
 	cached, ok := e.items[c.id]
 	if !ok {
