@@ -181,3 +181,18 @@ func TestMarkdownStyle(t *testing.T) {
 		}
 	}
 }
+
+func TestReferencesInCodeBlocksStayLiteral(t *testing.T) {
+	// Code blocks are shown literally; text and code spans are decoded, so
+	// control references there are replaced (also without a semicolon or
+	// with leading zeros).
+	src := "Text &#27;[2J and `code &#10; &#27` here &#0000000027;x.\n\n```\nblock &#10; &#x1b;\n```\n\n    indented &#7;\n"
+	out := strings.Join(RenderMarkdown(src, 60), "\n")
+	assertOnlySafeSequences(t, out)
+	text := ansi.Strip(out)
+	for _, want := range []string{"code \uFFFD \uFFFD", "here \uFFFDx", "block &#10; &#x1b;", "indented &#7;", "Text \uFFFD[2J"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("rendered text lacks %q:\n%s", want, text)
+		}
+	}
+}

@@ -15,6 +15,10 @@ import (
 	gansi "charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/ast"
+	"github.com/yuin/goldmark/extension"
+	"github.com/yuin/goldmark/text"
 
 	"github.com/ricoberger/tower/internal/item"
 )
@@ -71,9 +75,11 @@ func MarkdownStyle(name string) (gansi.StyleConfig, error) {
 	return withoutMargin(st), nil
 }
 
-// controlReferences matches numeric character references, which Markdown
-// decodes into characters after the input was sanitized.
-var controlReferences = regexp.MustCompile(`&#(?:[0-9]{1,8}|[xX][0-9a-fA-F]{1,7});`)
+// controlReferences matches numeric character references, which glamour
+// decodes into characters after the input was sanitized (outside code
+// blocks). Like the decoder, it accepts any number of digits and a missing
+// semicolon.
+var controlReferences = regexp.MustCompile(`&#(?:[0-9]+|[xX][0-9a-fA-F]+);?`)
 
 // neutralizeReference replaces a numeric character reference to a control
 // character with U+FFFD and keeps every other reference.
@@ -88,6 +94,59 @@ func neutralizeReference(ref string) string {
 		return "\uFFFD"
 	}
 	return ref
+}
+
+// neutralizeReferences replaces numeric character references to control
+// characters outside code blocks. Code blocks are shown literally, so their
+// references are kept; glamour decodes references in code spans, so those
+// are replaced too.
+func neutralizeReferences(src string) string {
+	locs := controlReferences.FindAllStringIndex(src, -1)
+	if len(locs) == 0 {
+		return src
+	}
+	code := codeRanges(src)
+	var b strings.Builder
+	last, c := 0, 0
+	for _, loc := range locs {
+		for c < len(code) && code[c][1] <= loc[0] {
+			c++
+		}
+		inCode := c < len(code) && code[c][0] <= loc[0] && loc[1] <= code[c][1]
+		ref := src[loc[0]:loc[1]]
+		if repl := neutralizeReference(ref); repl != ref && !inCode {
+			b.WriteString(src[last:loc[0]])
+			b.WriteString(repl)
+			last = loc[1]
+		}
+	}
+	b.WriteString(src[last:])
+	return b.String()
+}
+
+// codeRanges returns the byte ranges of the code block contents of the
+// Markdown source, parsed like glamour parses it, in document order.
+func codeRanges(src string) [][2]int {
+	source := []byte(src)
+	doc := goldmark.New(goldmark.WithExtensions(extension.GFM, extension.DefinitionList)).
+		Parser().Parse(text.NewReader(source))
+	var ranges [][2]int
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch n := n.(type) {
+		case *ast.CodeBlock, *ast.FencedCodeBlock:
+			lines := n.Lines()
+			for i := range lines.Len() {
+				seg := lines.At(i)
+				ranges = append(ranges, [2]int{seg.Start, seg.Stop})
+			}
+			return ast.WalkSkipChildren, nil
+		}
+		return ast.WalkContinue, nil
+	})
+	return ranges
 }
 
 // trailingPadding matches trailing spaces and SGR sequences of a line.
@@ -196,10 +255,10 @@ func MarkdownRenderer(style gansi.StyleConfig) func(src string, width int) []str
 func renderWithStyle(src string, width int, style gansi.StyleConfig) []string {
 	src = Sanitize(src)
 	plain := func() []string { return plainLines(src) }
-	src = controlReferences.ReplaceAllStringFunc(src, neutralizeReference)
 	if len(src) > MaxRenderBytes || width < 1 {
 		return plain()
 	}
+	src = neutralizeReferences(src)
 	r, err := glamour.NewTermRenderer(glamour.WithStyles(style), glamour.WithWordWrap(width))
 	if err != nil {
 		return plain()
