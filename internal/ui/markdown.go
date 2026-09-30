@@ -15,6 +15,7 @@ import (
 	"charm.land/glamour/v2"
 	gansi "charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
+	"github.com/alecthomas/chroma/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -47,7 +48,8 @@ func withoutMargin(s gansi.StyleConfig) gansi.StyleConfig {
 // example "light" or "dracula") selects that style, and anything else is
 // read as a JSON style file of at most MaxStyleBytes. The file is opened
 // without blocking, so a FIFO or device is rejected instead of waited on.
-// The document margin is always removed.
+// Code block (Chroma) settings are validated, because glamour cannot report
+// invalid ones. The document margin is always removed.
 func MarkdownStyle(name string) (gansi.StyleConfig, error) {
 	if name == "" {
 		return markdownStyle, nil
@@ -74,7 +76,76 @@ func MarkdownStyle(name string) (gansi.StyleConfig, error) {
 	if err := json.Unmarshal(data, &st); err != nil {
 		return gansi.StyleConfig{}, fmt.Errorf("markdown style %q: %w", name, err)
 	}
+	if err := validateChroma(st.CodeBlock.Chroma); err != nil {
+		return gansi.StyleConfig{}, fmt.Errorf("markdown style %q: code block colors: %w", name, err)
+	}
 	return withoutMargin(st), nil
+}
+
+// validateChroma checks that glamour can build a Chroma style from the code
+// block settings. glamour builds it with chroma.MustNewStyle while holding a
+// lock, so invalid settings would panic the renderer and leave the lock held.
+// The entries mirror glamour's.
+func validateChroma(c *gansi.Chroma) error {
+	if c == nil {
+		return nil
+	}
+	_, err := chroma.NewStyle("tower-validate", chroma.StyleEntries{
+		chroma.Text:                chromaEntry(c.Text),
+		chroma.Error:               chromaEntry(c.Error),
+		chroma.Comment:             chromaEntry(c.Comment),
+		chroma.CommentPreproc:      chromaEntry(c.CommentPreproc),
+		chroma.Keyword:             chromaEntry(c.Keyword),
+		chroma.KeywordReserved:     chromaEntry(c.KeywordReserved),
+		chroma.KeywordNamespace:    chromaEntry(c.KeywordNamespace),
+		chroma.KeywordType:         chromaEntry(c.KeywordType),
+		chroma.Operator:            chromaEntry(c.Operator),
+		chroma.Punctuation:         chromaEntry(c.Punctuation),
+		chroma.Name:                chromaEntry(c.Name),
+		chroma.NameBuiltin:         chromaEntry(c.NameBuiltin),
+		chroma.NameTag:             chromaEntry(c.NameTag),
+		chroma.NameAttribute:       chromaEntry(c.NameAttribute),
+		chroma.NameClass:           chromaEntry(c.NameClass),
+		chroma.NameConstant:        chromaEntry(c.NameConstant),
+		chroma.NameDecorator:       chromaEntry(c.NameDecorator),
+		chroma.NameException:       chromaEntry(c.NameException),
+		chroma.NameFunction:        chromaEntry(c.NameFunction),
+		chroma.NameOther:           chromaEntry(c.NameOther),
+		chroma.Literal:             chromaEntry(c.Literal),
+		chroma.LiteralNumber:       chromaEntry(c.LiteralNumber),
+		chroma.LiteralDate:         chromaEntry(c.LiteralDate),
+		chroma.LiteralString:       chromaEntry(c.LiteralString),
+		chroma.LiteralStringEscape: chromaEntry(c.LiteralStringEscape),
+		chroma.GenericDeleted:      chromaEntry(c.GenericDeleted),
+		chroma.GenericEmph:         chromaEntry(c.GenericEmph),
+		chroma.GenericInserted:     chromaEntry(c.GenericInserted),
+		chroma.GenericStrong:       chromaEntry(c.GenericStrong),
+		chroma.GenericSubheading:   chromaEntry(c.GenericSubheading),
+		chroma.Background:          chromaEntry(c.Background),
+	})
+	return err
+}
+
+// chromaEntry builds a Chroma style entry from a style primitive the way
+// glamour does.
+func chromaEntry(p gansi.StylePrimitive) string {
+	var parts []string
+	if p.Color != nil {
+		parts = append(parts, *p.Color)
+	}
+	if p.BackgroundColor != nil {
+		parts = append(parts, "bg:"+*p.BackgroundColor)
+	}
+	if p.Italic != nil && *p.Italic {
+		parts = append(parts, "italic")
+	}
+	if p.Bold != nil && *p.Bold {
+		parts = append(parts, "bold")
+	}
+	if p.Underline != nil && *p.Underline {
+		parts = append(parts, "underline")
+	}
+	return strings.Join(parts, " ")
 }
 
 // controlReferences matches numeric character references, which glamour

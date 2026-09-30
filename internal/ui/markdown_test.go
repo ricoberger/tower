@@ -2,6 +2,7 @@ package ui
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -12,7 +13,10 @@ import (
 
 	gansi "charm.land/glamour/v2/ansi"
 	"charm.land/glamour/v2/styles"
+	chromastyles "github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/ricoberger/tower/internal/snapshot"
 )
 
 // allowedSequences matches the sequences rendered Markdown may contain: SGR
@@ -221,5 +225,46 @@ func TestMarkdownStyleRejectsFIFO(t *testing.T) {
 		}
 		<-done
 		t.Fatal("opening the FIFO blocked")
+	}
+}
+
+// invalidChromaStyle has code block colors glamour cannot parse.
+const invalidChromaStyle = `{"code_block": {"chroma": {"text": {"color": "not-a-color"}}}}`
+
+// TestInvalidChromaStyle checks in a fresh process, where glamour has not
+// registered its code block theme yet, that invalid code block colors are
+// rejected and the UI renders code with the default style instead of
+// panicking.
+func TestInvalidChromaStyle(t *testing.T) {
+	if os.Getenv("TOWER_UI_CHROMA_CHILD") != "1" {
+		cmd := exec.CommandContext(t.Context(), os.Args[0], "-test.run=^TestInvalidChromaStyle$", "-test.v") // #nosec G204 G702 -- the test binary
+		cmd.Env = append(os.Environ(), "TOWER_UI_CHROMA_CHILD=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil || !strings.Contains(string(out), "--- PASS: TestInvalidChromaStyle") {
+			t.Fatalf("child: %v\n%s", err, out)
+		}
+		return
+	}
+	if _, ok := chromastyles.Registry["charm"]; ok {
+		t.Fatal("glamour's code block theme is registered already")
+	}
+	path := filepath.Join(t.TempDir(), "style.json")
+	if err := os.WriteFile(path, []byte(invalidChromaStyle), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MarkdownStyle(path); err == nil || !strings.Contains(err.Error(), "code block colors") {
+		t.Fatalf("err = %v", err)
+	}
+
+	// The UI falls back to the default style and renders code.
+	m := New(t.Context(), Options{Feed: snapshot.NewFeed(), MarkdownStyle: path, Heartbeat: -1})
+	msg := m.loadStyle()()
+	m.Update(msg)
+	if !strings.Contains(m.Footer(), "GLAMOUR_STYLE ignored") {
+		t.Fatalf("footer %q", m.Footer())
+	}
+	out := ansi.Strip(strings.Join(m.mdRender("```go\nfunc main() {}\n```\n", 40), "\n"))
+	if !strings.Contains(out, "func main() {}") {
+		t.Fatalf("code not rendered: %q", out)
 	}
 }
