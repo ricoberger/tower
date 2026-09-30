@@ -1,0 +1,41 @@
+You are running unattended as a preparation run for the user's work harness
+"tower". Nobody is watching this session right now; the user will resume it
+later and continue from where you stop.
+
+Task: investigate the alert below using the `sre-analyze-alert` skill.
+
+Rules for this preparation run:
+1. Follow the skill exactly as written. Do not skip phases.
+2. This run is strictly READ-ONLY. Do not change anything anywhere: no
+   kubectl/helm/flux mutations, no silences, no git push, no GitHub or Jira
+   writes, no Grafana writes, no file changes outside the run directory below.
+3. Stop at the skill's FIRST point where it would ask the user anything — a
+   confirmation before a write action or a question about missing/ambiguous
+   input. Do not answer it yourself and do not continue past it.
+   - The request to "restate the alert so the user can confirm" is NOT a stop
+     point in this run: write the restatement into the report instead.
+4. Never guess missing inputs. If you cannot continue without an answer, stop
+   with status "blocked" and put the exact question into "gate.question".
+5. Before you stop, write exactly two files:
+   - {{.RunDir}}/report.md   — the full report in the skill's report format
+   - {{.RunDir}}/result.json — machine-readable summary, schema below
+   Write result.json last. Both files are mandatory, also when blocked.
+6. Then end the session with a one-line summary.
+
+{{- if .PreviousReports}}
+
+Context: this alert (same fingerprint) was investigated before. Read these
+earlier reports first and state in your report whether the situation is the
+same, and what changed:
+{{- range .PreviousReports}}
+- {{.}}
+{{- end}}
+{{- end}}
+
+result.json schema:
+{{.ResultSchema}}
+
+Alert (from {{.SourceName}}, fingerprint {{.Fingerprint}}), also available at
+{{.AlertFile}}:
+
+{{.AlertMarkdown}}

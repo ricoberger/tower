@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -294,6 +295,47 @@ alerts:
 	e = testEnv(dir2, map[string]string{"TOWER_TEST_TOKEN": "x"}, time.Now())
 	if code, out, stderr := runCLI(t, e, "--config", cfg2, "config", "validate"); code != 0 {
 		t.Fatalf("validate while locked: %d %s %s", code, out, stderr)
+	}
+}
+
+func TestPromptOverrideValidation(t *testing.T) {
+	dir, cfgPath, _, stateDir := setup(t, "prompts:\n  alert: ./prompt.tmpl\n")
+	e := testEnv(dir, map[string]string{"TOWER_TEST_TOKEN": "x"}, time.Now())
+	tmpl := filepath.Join(dir, "prompt.tmpl")
+
+	// Missing, unparsable and invalid-field overrides fail validation and
+	// startup; the error in the populated previous-report branch counts.
+	for name, c := range map[string]struct{ text, want string }{
+		"missing":      {"", "cannot read the override template"},
+		"unparsable":   {"{{if .RunDir}}", "invalid template"},
+		"branch field": {"{{range .PreviousReports}}{{.Report}}{{end}}", "invalid template: template: prompt:1:28: executing \"prompt\" at <.Report>: can't evaluate field Report"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_ = os.Remove(tmpl)
+			if c.text != "" {
+				if err := os.WriteFile(tmpl, []byte(c.text), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code, out, _ := runCLI(t, e, "--config", cfgPath, "config", "validate")
+			if code != 1 || !strings.Contains(out, "error: prompts.alert: "+c.want) {
+				t.Fatalf("validate: code=%d out=%q", code, out)
+			}
+			code, _, stderr := runCLI(t, e, "--config", cfgPath, "--headless")
+			if code != 1 || !strings.Contains(stderr, "error: prompts.alert: "+c.want) {
+				t.Fatalf("startup: code=%d stderr=%q", code, stderr)
+			}
+			if _, err := os.Stat(stateDir); !errors.Is(err, fs.ErrNotExist) {
+				t.Errorf("startup with an invalid override touched the state: %v", err)
+			}
+		})
+	}
+
+	if err := os.WriteFile(tmpl, []byte("{{.RunDir}}{{range .PreviousReports}}{{.}}{{end}}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, _ := runCLI(t, e, "--config", cfgPath, "config", "validate"); code != 0 {
+		t.Fatalf("valid override: code=%d out=%q", code, out)
 	}
 }
 

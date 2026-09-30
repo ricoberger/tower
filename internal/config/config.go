@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/ricoberger/tower/internal/prompt/prep"
 )
 
 // Source types.
@@ -133,7 +135,12 @@ type Retention struct {
 
 // Prompts configures prompt template overrides.
 type Prompts struct {
+	// Alert is the normalized path of the preparation prompt override, or
+	// empty for the embedded template.
 	Alert string
+	// AlertText is the validated content of the Alert override, read once
+	// by Load so runs use the template that was validated.
+	AlertText string
 }
 
 // Report collects validation findings. Messages never contain configured
@@ -284,7 +291,31 @@ func Load(path string, env LookupEnv) (*Config, Report, error) {
 	cfg := build(raw, abs, env, &report)
 	validate(cfg, &report)
 	resolveInstances(cfg, env, &report)
+	loadPromptOverride(cfg, &report)
 	return cfg, report, nil
+}
+
+// loadPromptOverride reads and validates the prompts.alert override template.
+// Messages never contain the path or template content beyond the template
+// engine's position and field diagnostics.
+func loadPromptOverride(cfg *Config, report *Report) {
+	if cfg.Prompts.Alert == "" {
+		return
+	}
+	data, err := os.ReadFile(cfg.Prompts.Alert) // #nosec G304 G703 -- the user selects the prompt override
+	if err != nil {
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		report.errorf("prompts.alert: cannot read the override template: %v", err)
+		return
+	}
+	if err := prep.Validate(string(data)); err != nil {
+		report.errorf("prompts.alert: invalid template: %v", err)
+		return
+	}
+	cfg.Prompts.AlertText = string(data)
 }
 
 // decodeRaw parses exactly one YAML document. It rejects additional
