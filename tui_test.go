@@ -95,16 +95,20 @@ func (d *tuiDriver) run(ctx context.Context, tm tea.Model) error {
 func (d *tuiDriver) keys(ks ...string) {
 	d.t.Helper()
 	for _, k := range ks {
-		msg := tea.KeyPressMsg{Code: []rune(k)[0], Text: k}
-		if k == "enter" {
-			msg = tea.KeyPressMsg{Code: tea.KeyEnter}
-		}
 		select {
-		case d.in <- msg:
+		case d.in <- tuiKey(k):
 		case <-time.After(10 * time.Second):
 			d.t.Fatalf("UI not processing key %q", k)
 		}
 	}
+}
+
+// tuiKey is the key press of a single character or "enter".
+func tuiKey(k string) tea.KeyPressMsg {
+	if k == "enter" {
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
+	}
+	return tea.KeyPressMsg{Code: []rune(k)[0], Text: k}
 }
 
 // view renders the screen on the driver loop.

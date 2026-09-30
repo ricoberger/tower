@@ -61,20 +61,22 @@ func runTUI(ctx context.Context, cfg *config.Config, level slog.Level, stderr io
 	api := newEngineAPI()
 	started := make(chan struct{})
 	engineErr := make(chan error, 1)
-	go func() {
-		engineErr <- runEngine(engineCtx, engineOptions{
-			cfg:      cfg,
-			level:    level,
-			stderr:   io.Discard, // the screen belongs to the UI; tower.log has everything
-			now:      e.now,
-			lookPath: e.lookPath,
-			deliver:  e.deliver,
-			api:      api,
-			feed:     feed,
-			started:  func() { close(started) },
-			mode:     "tui",
-		})
-	}()
+	opts := engineOptions{
+		cfg:      cfg,
+		level:    level,
+		stderr:   io.Discard, // the screen belongs to the UI; tower.log has everything
+		now:      e.now,
+		lookPath: e.lookPath,
+		deliver:  e.deliver,
+		api:      api,
+		feed:     feed,
+		started:  func() { close(started) },
+		mode:     "tui",
+	}
+	if e.engineOptions != nil {
+		e.engineOptions(&opts)
+	}
+	go func() { engineErr <- runEngine(engineCtx, opts) }()
 	select {
 	case <-started:
 	case err := <-engineErr:

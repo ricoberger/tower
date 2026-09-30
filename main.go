@@ -52,6 +52,9 @@ type env struct {
 	// deliver overrides the engine's notification delivery (nil: desktop
 	// notifications).
 	deliver func(ctx context.Context, n notify.Notification) error
+	// engineOptions adjusts the engine options of the terminal UI mode
+	// (tests: tickers, hooks and runner timing).
+	engineOptions func(*engineOptions)
 }
 
 // withDefaults fills unset fields with the production behavior.
