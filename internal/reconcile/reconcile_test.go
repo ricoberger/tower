@@ -1436,3 +1436,126 @@ func TestIdempotentFullLifecycle(t *testing.T) {
 		t.Fatalf("history = %+v", s.get(id1).History)
 	}
 }
+
+func interrupted(id string, n int, reason item.RunReason, retryOf int) Event {
+	at := t0.Add(time.Second)
+	fin := t0.Add(time.Hour)
+	return Event{Kind: EventRunInterrupted, ItemID: id, Run: item.Run{
+		Number: n, Reason: reason, RetryOf: retryOf, QueuedAt: at, StartedAt: &at, FinishedAt: &fin,
+		Outcome: item.OutcomeInterrupted, Error: "interrupted",
+	}}
+}
+
+func TestRunInterrupted(t *testing.T) {
+	t.Run("preparing retries once", func(t *testing.T) {
+		s, a := preparingItem(t)
+		now := t0.Add(time.Hour)
+		res := s.step(now, nil, interrupted(id1, 1, item.ReasonAuto, 0))
+		it := s.get(id1)
+		wantState(t, it, item.StateQueued)
+		if it.Runs.PendingReason == nil || *it.Runs.PendingReason != item.ReasonRetry || it.Runs.Current != 1 {
+			t.Fatalf("runs = %+v", it.Runs)
+		}
+		enq := effects(res, EffectEnqueue)
+		if len(enq) != 1 || enq[0].Run != 2 || enq[0].Reason != item.ReasonRetry || len(res.Effects) != 1 {
+			t.Fatalf("effects = %+v", res.Effects)
+		}
+		if tr := transitions(res, id1); len(tr) != 1 || tr[0].From != item.StatePreparing || tr[0].To != item.StateQueued {
+			t.Fatalf("transitions = %+v", tr)
+		}
+		if s.items[id1].Runs[0].Outcome != item.OutcomeInterrupted {
+			t.Fatal("interrupted outcome not saved")
+		}
+		// The same evidence again is harmless and creates no second retry.
+		res = s.step(now, nil, interrupted(id1, 1, item.ReasonAuto, 0))
+		if len(res.Effects) != 0 || len(transitions(res, id1)) != 0 {
+			t.Fatalf("repeated interruption: %+v", res)
+		}
+		// An unchanged snapshot keeps the pending retry.
+		if res := s.step(now, []Snapshot{snap("dev", now, a)}); len(res.Effects) != 0 {
+			t.Fatalf("snapshot effects = %+v", res.Effects)
+		}
+		s.assertStable(now, snap("dev", now, a))
+		wantState(t, s.get(id1), item.StateQueued)
+
+		// The retry starts as run 2 and its interruption ends in needs-you
+		// without a notification or a third attempt.
+		res = s.step(now.Add(time.Second), nil, Event{Kind: EventRunStarted, ItemID: id1, Run: item.Run{
+			Number: 2, Reason: item.ReasonRetry, RetryOf: 1, QueuedAt: now, StartedAt: &now, Outcome: item.OutcomeRunning,
+		}})
+		wantState(t, s.get(id1), item.StatePreparing)
+		if len(res.Changes) != 1 || res.Changes[0].Runs[0].RetryOf != 1 {
+			t.Fatalf("retry start = %+v", res)
+		}
+		res = s.step(now.Add(time.Hour), nil, interrupted(id1, 2, item.ReasonRetry, 1))
+		wantState(t, s.get(id1), item.StateNeedsYou)
+		if len(res.Effects) != 0 {
+			t.Fatalf("effects = %+v", res.Effects)
+		}
+		for _, h := range s.get(id1).History {
+			if h.Action == item.ActionManualRun {
+				t.Fatal("recovery recorded a manual-run action")
+			}
+		}
+	})
+	for _, mk := range []struct {
+		name  string
+		setup func(t *testing.T, s *sim, a source.Alert)
+		state item.State
+	}{
+		{"snoozed", func(t *testing.T, s *sim, a source.Alert) {
+			sup := alert(t, "dev", "fp1", "suppressed", a.StartsAt, nil)
+			s.step(t0.Add(2*time.Second), []Snapshot{snap("dev", t0.Add(2*time.Second), sup)})
+		}, item.StateSnoozed},
+		{"resolved", func(t *testing.T, s *sim, _ source.Alert) {
+			s.step(t0.Add(2*time.Second), []Snapshot{snap("dev", t0.Add(2*time.Second))})
+		}, item.StateResolved},
+		{"done", func(t *testing.T, s *sim, _ source.Alert) {
+			s.step(t0.Add(2*time.Second), nil, ev(EventDismiss, id1))
+		}, item.StateDone},
+	} {
+		t.Run(mk.name+" records only", func(t *testing.T) {
+			s, a := preparingItem(t)
+			mk.setup(t, s, a)
+			wantState(t, s.get(id1), mk.state)
+			res := s.step(t0.Add(time.Hour), nil, interrupted(id1, 1, item.ReasonAuto, 0))
+			wantState(t, s.get(id1), mk.state)
+			if len(res.Effects) != 0 || len(transitions(res, id1)) != 0 || s.items[id1].Runs[0].Outcome != item.OutcomeInterrupted {
+				t.Fatalf("result = %+v", res)
+			}
+		})
+	}
+	t.Run("invalid", func(t *testing.T) {
+		s, _ := preparingItem(t)
+		bad := interrupted(id1, 1, item.ReasonAuto, 0)
+		bad.Run.Outcome = item.OutcomeFailed
+		for _, e := range []Event{interrupted(id1, 2, item.ReasonAuto, 0), bad, interrupted("alert-dev-x-1", 1, item.ReasonAuto, 0)} {
+			if res := s.step(t0.Add(time.Hour), nil, e); len(res.Ignored) != 1 || len(res.Changes) != 0 {
+				t.Fatalf("result = %+v", res)
+			}
+		}
+	})
+}
+
+func TestRunRecovered(t *testing.T) {
+	s, _ := needsYouItem(t)
+	at := t0.Add(time.Hour)
+	r := item.Run{Number: 3, Reason: item.ReasonManual, QueuedAt: at, StartedAt: &at, Outcome: item.OutcomeRunning}
+	res := s.step(at, nil, Event{Kind: EventRunRecovered, ItemID: id1, Run: r})
+	it := s.get(id1)
+	wantState(t, it, item.StateNeedsYou)
+	if it.Runs.Current != 3 || len(res.Effects) != 0 || len(transitions(res, id1)) != 0 {
+		t.Fatalf("result = %+v runs = %+v", res, it.Runs)
+	}
+	if len(res.Changes) != 1 || len(res.Changes[0].Runs) != 1 || res.Changes[0].Runs[0].Number != 3 {
+		t.Fatalf("changes = %+v", res.Changes)
+	}
+	// The recovered run now counts as executing: manual runs are rejected.
+	if res := s.step(at, nil, ev(EventManualRun, id1)); len(res.Ignored) != 1 {
+		t.Fatalf("manual run during a recovered run: %+v", res)
+	}
+	// Runs at or behind current are not recovered again.
+	if res := s.step(at, nil, Event{Kind: EventRunRecovered, ItemID: id1, Run: r}); len(res.Ignored) != 1 || len(res.Changes) != 0 {
+		t.Fatalf("result = %+v", res)
+	}
+}

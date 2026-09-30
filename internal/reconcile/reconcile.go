@@ -35,6 +35,10 @@
 //     which reopen done applies.
 //   - Manual run: the user queues a run for a new, needs-you, snoozed or
 //     resolved item regardless of prepare_after.
+//   - Interruption (startup recovery): an interrupted current run of a
+//     preparing item queues one automatic retry; an interrupted retry moves
+//     the item to needs-you without a notification. Other states only record
+//     the run.
 package reconcile
 
 import (
@@ -91,6 +95,16 @@ const (
 	EventRunStarted EventKind = "run-started"
 	// EventRunFinished reports that a run ended.
 	EventRunFinished EventKind = "run-finished"
+	// EventRunInterrupted reports a run found dead or unverifiable on
+	// startup without completion evidence (outcome interrupted). An
+	// interrupted current run of a preparing item is retried once; an
+	// interrupted retry moves the item to needs-you.
+	EventRunInterrupted EventKind = "run-interrupted"
+	// EventRunRecovered reports run metadata found ahead of runs.current on
+	// startup that is not the start of the queued run. It advances
+	// runs.current without changing the item state, so the run number is
+	// never reused.
+	EventRunRecovered EventKind = "run-recovered"
 )
 
 // Event is a synthetic runner or user event.
@@ -454,6 +468,38 @@ func (p *pass) event(ev Event) {
 			p.transition(w, item.StateNeedsYou, fmt.Sprintf("run %d %s", r.Number, r.Outcome))
 			p.effect(Effect{Kind: EffectNotify, ItemID: it.ID, Run: r.Number, Outcome: r.Outcome})
 		}
+
+	case EventRunInterrupted:
+		r := ev.Run
+		if r.Number < 1 || r.Number > it.Runs.Current || r.Outcome != item.OutcomeInterrupted {
+			p.ignore(ev, "unknown run")
+			return
+		}
+		w.setRun(r)
+		w.runWrites = append(w.runWrites, r.Clone())
+		p.touch(w)
+		if it.State != item.StatePreparing || r.Number != it.Runs.Current {
+			return
+		}
+		if r.Reason == item.ReasonRetry {
+			p.transition(w, item.StateNeedsYou, fmt.Sprintf("run %d interrupted", r.Number))
+			return
+		}
+		reason := item.ReasonRetry
+		it.Runs.PendingReason = &reason
+		p.transition(w, item.StateQueued, fmt.Sprintf("run %d interrupted, retrying", r.Number))
+		p.effect(Effect{Kind: EffectEnqueue, ItemID: it.ID, Run: it.Runs.Current + 1, Reason: item.ReasonRetry})
+
+	case EventRunRecovered:
+		r := ev.Run
+		if r.Number <= it.Runs.Current {
+			p.ignore(ev, "run is not ahead of the item")
+			return
+		}
+		it.Runs.Current = r.Number
+		w.setRun(r)
+		w.runWrites = append(w.runWrites, r.Clone())
+		p.touch(w)
 
 	default:
 		p.ignore(ev, "unsupported event")
