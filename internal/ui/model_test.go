@@ -674,6 +674,19 @@ func TestHeader(t *testing.T) {
 	if strings.Contains(h, "✗") || !strings.Contains(h, "broken ✓ 2m ago") || strings.Contains(h, "unreadable") {
 		t.Fatalf("header %q", h)
 	}
+	// A failed notification delivery is shown, sanitized, until a later
+	// delivery succeeds.
+	s.Notify = NotifyHealth{LastErr: "terminal-notifier failed:\x1b[31m exit status 1", ItemID: "x", ItemTitle: "Alert\nx"}
+	f.d.send(SnapshotMsg(s))
+	h = ansi.Strip(f.view())
+	if !strings.Contains(h, "notification ✗ terminal-notifier failed:[31m exit status 1 (Alert x)") {
+		t.Fatalf("header %q", h)
+	}
+	s.Notify = NotifyHealth{}
+	f.d.send(SnapshotMsg(s))
+	if h = ansi.Strip(f.d.m.headerText()); strings.Contains(h, "notification") {
+		t.Fatalf("header %q", h)
+	}
 }
 
 const readyResult = `{"version":1,"status":"ready","summary":"Pods crash on start.","confidence":"high",

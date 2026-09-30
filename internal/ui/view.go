@@ -55,6 +55,10 @@ func (m *Model) headerText() string {
 		return Bold("tower") + " · " + Dim("starting…")
 	}
 	var parts []string
+	// A failed notification comes first so a narrow terminal still shows it.
+	if n := m.snap.Notify; n.LastErr != "" {
+		parts = append(parts, "notification "+Colored("red", "✗ "+SanitizeLine(n.LastErr))+" ("+SanitizeLine(n.ItemTitle)+")")
+	}
 	for _, s := range m.snap.Sources {
 		name := SanitizeLine(s.Name)
 		switch {

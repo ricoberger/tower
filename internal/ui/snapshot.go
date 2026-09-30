@@ -22,6 +22,16 @@ type Snapshot struct {
 	Running     int
 	Concurrency int
 	Queued      int
+	// Notify is the desktop notification health.
+	Notify NotifyHealth
+}
+
+// NotifyHealth reports the latest failed desktop notification delivery. It
+// is empty when no delivery failed or a later one succeeded.
+type NotifyHealth struct {
+	LastErr   string
+	ItemID    string
+	ItemTitle string
 }
 
 // ItemView is one applied item with its runs.

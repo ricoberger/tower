@@ -141,6 +141,10 @@ type engine struct {
 	// they are applied again by the next reconciliation.
 	pending []reconcile.Event
 	deliver func(context.Context, notify.Notification) error
+	// notified reports delivery outcomes to the loop; notifyErr is the
+	// latest failure, cleared by the next successful delivery.
+	notified  chan notifyOutcome
+	notifyErr *notifyOutcome
 	// bgCtx and wg bound background work (polls, pruning, notifications).
 	bgCtx context.Context
 	wg    *sync.WaitGroup
@@ -224,6 +228,7 @@ func runEngine(ctx context.Context, opts engineOptions) error {
 		queue:        runner.NewQueue(cfg.Alerts.SeverityOrder),
 		blocked:      map[string]blockedStart{},
 		deliver:      deliver,
+		notified:     make(chan notifyOutcome, 1),
 	}
 	return e.run(ctx, opts, findings)
 }
@@ -317,6 +322,12 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 		case <-ctx.Done():
 			e.log.Info("tower engine stopping")
 			return nil
+		case o := <-e.notified:
+			if o.err != "" {
+				e.notifyErr = &o
+			} else {
+				e.notifyErr = nil
+			}
 		case ids := <-e.pruned:
 			for _, id := range ids {
 				delete(e.items, id)
@@ -369,6 +380,7 @@ func (e *engine) publish(feed *ui.Feed) {
 	}
 	snap := ui.Snapshot{
 		Unreadable:  len(e.unreadable),
+		Notify:      e.notifyHealth(),
 		Running:     e.runner.Busy(),
 		Concurrency: e.cfg.Runs.Concurrency,
 		Queued:      e.queue.Len(),

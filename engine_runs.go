@@ -13,6 +13,7 @@ import (
 	"github.com/ricoberger/tower/internal/reconcile"
 	"github.com/ricoberger/tower/internal/result"
 	"github.com/ricoberger/tower/internal/runner"
+	"github.com/ricoberger/tower/internal/ui"
 )
 
 // startRetryDelay is how long a queued run whose start failed without a
@@ -435,13 +436,36 @@ func (e *engine) notifyOutcome(ef reconcile.Effect) {
 			}
 		}
 	}
-	deliver, log, ctx := e.deliver, e.log, e.bgCtx
+	deliver, log, ctx, notified := e.deliver, e.log, e.bgCtx, e.notified
 	attrs := []any{"item_id", it.ID, "run", ef.Run, "source", it.Source.Name, "outcome", string(ef.Outcome)}
 	e.wg.Go(func() {
+		o := notifyOutcome{itemID: it.ID, title: it.Title}
 		if err := deliver(ctx, n); err != nil {
 			log.Warn("notification delivery failed", append(attrs, "error", err.Error())...)
-			return
+			o.err = err.Error()
+		} else {
+			log.Debug("notification delivered", attrs...)
 		}
-		log.Debug("notification delivered", attrs...)
+		// The loop shows the outcome in the UI; the run outcome itself is
+		// never affected by a delivery.
+		select {
+		case notified <- o:
+		case <-ctx.Done():
+		}
 	})
+}
+
+// notifyOutcome is the result of one notification delivery.
+type notifyOutcome struct {
+	itemID string
+	title  string
+	err    string
+}
+
+// notifyHealth returns the latest delivery failure for the UI.
+func (e *engine) notifyHealth() ui.NotifyHealth {
+	if e.notifyErr == nil {
+		return ui.NotifyHealth{}
+	}
+	return ui.NotifyHealth{LastErr: e.notifyErr.err, ItemID: e.notifyErr.itemID, ItemTitle: e.notifyErr.title}
 }
