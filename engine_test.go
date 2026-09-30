@@ -980,3 +980,46 @@ func TestEngineStartupWarnsAboutMissingInstance(t *testing.T) {
 		t.Errorf("requests = %d", am.requests())
 	}
 }
+
+// An item deleted by retention pruning while it is being loaded is
+// forgotten without being reported as unreadable; genuinely unreadable
+// items are still reported.
+func TestLoadDuringPruning(t *testing.T) {
+	st, err := item.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	id := seedItem(t, st, "fp1", item.StateDone, time.Now().Add(-time.Hour))
+	logs := &syncBuffer{}
+	e := &engine{
+		store: st, log: slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		items: map[string]*cachedItem{}, unreadable: map[string]item.Stamp{},
+	}
+	// A half-deleted item (item.yaml already removed) of the pruner.
+	if err := os.Remove(filepath.Join(st.ItemDir(id), "item.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	e.pruning.Store(id, struct{}{})
+	e.refresh()
+	if strings.Contains(logs.String(), "skipping unreadable item") || len(e.unreadable) != 0 || len(e.items) != 0 {
+		t.Fatalf("concurrent deletion reported as unreadable:\n%s", logs.String())
+	}
+	// The same state without a deletion in progress is unreadable.
+	e.pruning.Delete(id)
+	e.refresh()
+	if !strings.Contains(logs.String(), "skipping unreadable item") || len(e.unreadable) != 1 {
+		t.Fatalf("unreadable item not reported:\n%s", logs.String())
+	}
+	// A cached item whose directory is gone when it is (re)loaded.
+	e.unreadable = map[string]item.Stamp{}
+	e.items[id] = &cachedItem{}
+	before := strings.Count(logs.String(), "skipping unreadable item")
+	if err := os.RemoveAll(st.ItemDir(id)); err != nil {
+		t.Fatal(err)
+	}
+	e.load(id, item.Stamp{})
+	if strings.Count(logs.String(), "skipping unreadable item") != before || len(e.items) != 0 || len(e.unreadable) != 0 {
+		t.Fatalf("removed item reported as unreadable:\n%s", logs.String())
+	}
+}

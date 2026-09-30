@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"os"
@@ -113,6 +114,9 @@ type engine struct {
 	status     map[string]*sourceStatus
 	meta       map[string]prompt.AlertMeta
 	pruned     chan []string
+	// pruning holds the IDs the background pruner is deleting; a failed
+	// load of such an item is a concurrent deletion, not corruption.
+	pruning sync.Map
 	// rounds delivers the combined result of a background poll round;
 	// inFlight is true from the start of a round until the loop applied it.
 	rounds       chan []pollResult
@@ -432,8 +436,27 @@ func (e *engine) refresh() {
 	}
 }
 
+// removed reports whether an item is being deleted by the pruner or its
+// directory no longer exists.
+func (e *engine) removed(id string) bool {
+	if _, ok := e.pruning.Load(id); ok {
+		return true
+	}
+	_, err := os.Lstat(e.store.ItemDir(id))
+	return errors.Is(err, fs.ErrNotExist)
+}
+
 func (e *engine) load(id string, st item.Stamp) {
 	l, err := e.store.Load(id)
+	if err != nil && e.removed(id) {
+		// Deleted concurrently (retention pruning): forget it without
+		// reporting it as unreadable. A still existing item is loaded
+		// again by the next refresh.
+		delete(e.items, id)
+		delete(e.unreadable, id)
+		e.log.Debug("item removed while loading", "item_id", id, "error", err)
+		return
+	}
 	if err != nil {
 		delete(e.items, id)
 		_, known := e.unreadable[id]
@@ -685,7 +708,9 @@ func (e *engine) pruneOnce(ctx context.Context, skip map[string]bool) {
 		if skip[c.ID] {
 			continue
 		}
+		e.pruning.Store(c.ID, struct{}{})
 		ok, err := e.store.PruneItem(c.ID, cutoff)
+		e.pruning.Delete(c.ID)
 		if err != nil {
 			e.log.Error("prune item", "item_id", c.ID, "error", err)
 			continue
