@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ricoberger/tower/internal/notify"
 )
@@ -49,6 +51,7 @@ func fixtureEnv(t *testing.T, stateDir, mode string) {
 // killFixtures kills the process groups of all runs below stateDir (from
 // their metadata and the fixture's evidence) and recorded descendants.
 func killFixtures(stateDir string) {
+	var targets []int
 	runs, _ := filepath.Glob(filepath.Join(stateDir, "items", "*", "runs", "*"))
 	for _, dir := range runs {
 		var pids []int
@@ -76,7 +79,17 @@ func killFixtures(stateDir string) {
 		for _, pid := range pids {
 			if pid > 1 || pid < -1 {
 				_ = syscall.Kill(pid, syscall.SIGKILL)
+				targets = append(targets, pid)
 			}
+		}
+	}
+	// Wait until the processes are gone so that no fixture writes into a
+	// directory that is being removed.
+	deadline := time.Now().Add(10 * time.Second)
+	for _, p := range targets {
+		for time.Now().Before(deadline) && !errors.Is(syscall.Kill(p, 0), syscall.ESRCH) {
+			_ = syscall.Kill(p, syscall.SIGKILL)
+			time.Sleep(5 * time.Millisecond)
 		}
 	}
 }

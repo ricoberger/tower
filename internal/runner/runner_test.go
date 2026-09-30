@@ -88,13 +88,25 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
-// killFixtures kills the process groups and descendants recorded by fake
-// runs below dir.
+// killFixtures kills the wrapper process groups (meta.yaml PIDs) and the
+// process groups and descendants recorded by fake runs below dir, then
+// waits until they are gone so that no fixture writes into a directory
+// that is being removed.
 func killFixtures(dir string) {
-	for _, pattern := range []string{"fake-pgid", "fake-descendant", "fake-pid"} {
-		files, _ := filepath.Glob(filepath.Join(dir, "items", "*", "runs", "*", pattern))
-		for _, f := range files {
-			data, err := os.ReadFile(f) // #nosec G304 -- test fixture evidence
+	var targets []int
+	runs, _ := filepath.Glob(filepath.Join(dir, "items", "*", "runs", "*"))
+	for _, run := range runs {
+		if data, err := os.ReadFile(filepath.Join(run, "meta.yaml")); err == nil { // #nosec G304 -- test state
+			for line := range strings.SplitSeq(string(data), "\n") {
+				if v, ok := strings.CutPrefix(line, "pid: "); ok {
+					if pid, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && pid > 1 {
+						targets = append(targets, -pid)
+					}
+				}
+			}
+		}
+		for _, name := range []string{"fake-pgid", "fake-descendant", "fake-pid"} {
+			data, err := os.ReadFile(filepath.Join(run, name)) // #nosec G304 -- test fixture evidence
 			if err != nil {
 				continue
 			}
@@ -102,11 +114,20 @@ func killFixtures(dir string) {
 			if err != nil || pid <= 1 {
 				continue
 			}
-			if pattern == "fake-pgid" {
-				_ = syscall.Kill(-pid, syscall.SIGKILL)
-			} else {
-				_ = syscall.Kill(pid, syscall.SIGKILL)
+			if name == "fake-pgid" {
+				pid = -pid
 			}
+			targets = append(targets, pid)
+		}
+	}
+	for _, p := range targets {
+		_ = syscall.Kill(p, syscall.SIGKILL)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for _, p := range targets {
+		for time.Now().Before(deadline) && !errors.Is(syscall.Kill(p, 0), syscall.ESRCH) {
+			_ = syscall.Kill(p, syscall.SIGKILL)
+			time.Sleep(5 * time.Millisecond)
 		}
 	}
 }
