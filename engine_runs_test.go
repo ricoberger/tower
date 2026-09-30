@@ -868,7 +868,9 @@ func TestRunAPIReconcileFailure(t *testing.T) {
 		t.Fatal("a failed request started work")
 	}
 	// Once the counters are readable again, the request is accepted.
-	writeFixture(t, counters, string(orig))
+	if err := os.WriteFile(counters, orig, 0o600); err != nil { // #nosec G703 -- test state
+		t.Fatal(err)
+	}
 	if err := h.api.ManualRun(ctx, id("young")); err != nil {
 		t.Fatal(err)
 	}
