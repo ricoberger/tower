@@ -125,6 +125,15 @@ func runTUI(ctx context.Context, cfg *config.Config, level slog.Level, stderr io
 		lookPath:    e.lookPath,
 		processOwns: e.processOwns,
 	}
+	// The preview renders Markdown with the GLAMOUR_STYLE theme, like other
+	// glamour-based tools; an unusable style falls back to the default.
+	styleName, _ := e.lookup("GLAMOUR_STYLE")
+	style, styleErr := ui.MarkdownStyle(styleName)
+	var warning string
+	if styleErr != nil {
+		style, _ = ui.MarkdownStyle("")
+		warning = "GLAMOUR_STYLE ignored: " + styleErr.Error()
+	}
 	m := ui.New(uiCtx, ui.Options{
 		Feed:          feed,
 		Engine:        api,
@@ -138,8 +147,10 @@ func runTUI(ctx context.Context, cfg *config.Config, level slog.Level, stderr io
 			_, err := res.resume(ctx, resumeTarget{id: r.ItemID, run: r.Run, session: r.SessionID, placement: r.Placement})
 			return err
 		},
-		Open: e.openURL,
-		Hint: apiHint,
+		Open:           e.openURL,
+		Hint:           apiHint,
+		RenderMarkdown: ui.MarkdownRenderer(style),
+		Warning:        warning,
 	})
 	uiErr := e.tui(uiCtx, m)
 	stopUI()

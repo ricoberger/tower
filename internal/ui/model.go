@@ -85,8 +85,11 @@ type Options struct {
 	// EditorStopDelay overrides EditorStopDelay (tests).
 	EditorStopDelay time.Duration
 	// RenderMarkdown renders a Markdown document for a width in the
-	// background (nil: RenderMarkdown; tests).
+	// background (nil: RenderMarkdown with the default style).
 	RenderMarkdown func(src string, width int) []string
+	// Warning is shown as an error hint when the UI starts (for example an
+	// unusable GLAMOUR_STYLE).
+	Warning string
 }
 
 type focusArea int
@@ -216,6 +219,9 @@ func New(ctx context.Context, opts Options) *Model {
 		opts.RenderMarkdown = RenderMarkdown
 	}
 	m := &Model{ctx: ctx, opts: opts, now: opts.Now()}
+	if opts.Warning != "" {
+		m.setHint(opts.Warning, true)
+	}
 	if s, ok := opts.Feed.Latest(); ok {
 		m.applySnapshot(s)
 	}

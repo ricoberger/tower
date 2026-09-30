@@ -344,3 +344,29 @@ func TestTUIStartupFailures(t *testing.T) {
 		t.Fatalf("code %d stderr %q", code, stderr)
 	}
 }
+
+func TestTUIGlamourStyle(t *testing.T) {
+	rt := newRunTest(t, 1, "")
+	for style, want := range map[string]string{
+		"":                                    "",
+		"light":                               "",
+		filepath.Join(rt.dir, "missing.json"): "GLAMOUR_STYLE ignored: markdown style",
+	} {
+		vars := map[string]string{}
+		if style != "" {
+			vars["GLAMOUR_STYLE"] = style
+		}
+		e := testEnv(rt.dir, vars, rt.t0)
+		var footer string
+		e.tui = func(_ context.Context, m tea.Model) error {
+			footer = m.(*ui.Model).Footer()
+			return nil
+		}
+		if code, _, stderr := runCLI(t, e, "--config", rt.cfgPath); code != 0 {
+			t.Fatalf("%q: code %d stderr %q", style, code, stderr)
+		}
+		if want == "" && strings.Contains(footer, "GLAMOUR_STYLE") || !strings.Contains(footer, want) {
+			t.Errorf("%q: footer %q", style, footer)
+		}
+	}
+}

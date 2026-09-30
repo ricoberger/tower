@@ -1,11 +1,15 @@
 package ui
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 	"unicode"
 
+	gansi "charm.land/glamour/v2/ansi"
+	"charm.land/glamour/v2/styles"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -106,5 +110,74 @@ func TestRenderMarkdown(t *testing.T) {
 	lines = RenderMarkdown(big, 40)
 	if lines[0] != "# big[2J" || len(lines) != 2 {
 		t.Fatalf("oversized document: first line %q, %d lines", lines[0], len(lines))
+	}
+}
+
+func TestMarkdownStyle(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		t.Helper()
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	margin := func(s gansi.StyleConfig) uint {
+		if s.Document.Margin == nil {
+			return 99
+		}
+		return *s.Document.Margin
+	}
+	def, err := MarkdownStyle("")
+	if err != nil || margin(def) != 0 || def.H1.Color == nil || *def.H1.Color != *styles.DarkStyleConfig.H1.Color {
+		t.Fatalf("default style: %v", err)
+	}
+	light, err := MarkdownStyle("light")
+	if err != nil || margin(light) != 0 || *light.Document.Color != *styles.LightStyleConfig.Document.Color {
+		t.Fatalf("light style: %v", err)
+	}
+	if *styles.LightStyleConfig.Document.Margin == 0 {
+		t.Fatal("the standard style was modified")
+	}
+
+	// A JSON style file, like the Catppuccin themes, is used as is apart
+	// from the document margin.
+	custom, err := MarkdownStyle(write("theme.json", `{"document": {"margin": 2}, "strong": {"color": "#ff0000", "bold": true}}`))
+	if err != nil || margin(custom) != 0 || custom.Strong.Color == nil || *custom.Strong.Color != "#ff0000" {
+		t.Fatalf("style file: %v %+v", err, custom.Strong)
+	}
+	out := strings.Join(MarkdownRenderer(custom)("a **b** c\n", 40), "\n")
+	if !strings.Contains(out, "38;2;255;0;0") && !strings.Contains(out, "91") && !strings.Contains(out, "38;5;196") {
+		t.Errorf("custom color not used: %q", out)
+	}
+	if strings.Join(RenderMarkdown("a **b** c\n", 40), "\n") == out {
+		t.Error("the style file made no difference")
+	}
+
+	// Styles cannot bring terminal sequences past the output filter.
+	hostile, err := MarkdownStyle(write("hostile.json", `{
+		"document": {"block_prefix": "\u001b]52;c;aGk=\u0007\u001b[2J", "prefix": "\u001b]0;t\u0007"},
+		"heading": {"block_suffix": "\u001b]8;;http://e", "prefix": "\u009b2J"},
+		"link": {"format": "\u001b[?1049h{{.text}}"}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = strings.Join(MarkdownRenderer(hostile)("# T\n\ntext [l](http://x)\n", 40), "\n")
+	assertOnlySafeSequences(t, out)
+	if !strings.Contains(ansi.Strip(out), "T") {
+		t.Fatalf("hostile style output: %q", out)
+	}
+
+	for name, arg := range map[string]string{
+		"missing":   filepath.Join(dir, "missing.json"),
+		"directory": dir,
+		"invalid":   write("bad.json", "{"),
+		"oversized": write("big.json", `{"document":{"color":"`+strings.Repeat("x", MaxStyleBytes)+`"}}`),
+	} {
+		if _, err := MarkdownStyle(arg); err == nil {
+			t.Errorf("%s: no error", name)
+		}
 	}
 }

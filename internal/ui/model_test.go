@@ -1573,3 +1573,10 @@ func TestPagingKeys(t *testing.T) {
 		t.Fatalf("confirmation: selection %d scroll %d", sel(), f.d.m.scroll)
 	}
 }
+
+func TestWarningHint(t *testing.T) {
+	f := newFixture(t, func(o *Options) { o.Warning = "GLAMOUR_STYLE ignored: bad" })
+	if f.d.m.Footer() != "GLAMOUR_STYLE ignored: bad" || !f.d.m.footerErr {
+		t.Fatalf("footer %q", f.d.m.Footer())
+	}
+}

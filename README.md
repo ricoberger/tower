@@ -283,6 +283,15 @@ shown as plain text. Report and alert content is sanitized: only text, colors
 and complete hyperlinks reach the terminal, never other escape sequences.
 Documents over 1 MiB are shown as plain text; files over 16 MiB are not read.
 
+The theme follows `GLAMOUR_STYLE` in the environment `tower` is started from,
+like other glamour-based tools: a standard style name (`dark`, the default,
+`light`, `dracula`, `tokyo-night`, `pink`, `ascii`, `notty`) or the path of a
+JSON style file such as a
+[Catppuccin Glamour theme](https://github.com/catppuccin/glamour) (at most
+1 MiB). The document margin of the style is ignored so the preview uses its
+full width. When the style cannot be used, the default style is used and the
+footer says why. A style cannot bypass the sanitization above.
+
 The latest Copilot message comes from the last 256 KiB of the run's
 `output.jsonl`; the file is only reread when its size or modification time
 changes. When a long session writes more than 256 KiB without a new

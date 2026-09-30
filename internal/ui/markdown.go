@@ -1,6 +1,10 @@
 package ui
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -19,14 +23,53 @@ import (
 // shown as plain text.
 const MaxRenderBytes = 1 << 20
 
-// markdownStyle is glamour's dark style without the document margin, so the
-// preview width is used in full.
-var markdownStyle = func() gansi.StyleConfig {
-	s := styles.DarkStyleConfig
+// MaxStyleBytes bounds the size of a JSON style file.
+const MaxStyleBytes = 1 << 20
+
+// markdownStyle is glamour's dark style without the document margin.
+var markdownStyle = withoutMargin(styles.DarkStyleConfig)
+
+// withoutMargin removes the document margin, so the preview width is used
+// in full.
+func withoutMargin(s gansi.StyleConfig) gansi.StyleConfig {
 	zero := uint(0)
 	s.Document.Margin = &zero
 	return s
-}()
+}
+
+// MarkdownStyle resolves a glamour style the way GLAMOUR_STYLE is
+// interpreted: empty selects the dark style, a standard style name (for
+// example "light" or "dracula") selects that style, and anything else is
+// read as a JSON style file of at most MaxStyleBytes. The document margin is
+// always removed.
+func MarkdownStyle(name string) (gansi.StyleConfig, error) {
+	if name == "" {
+		return markdownStyle, nil
+	}
+	if st, ok := styles.DefaultStyles[name]; ok {
+		return withoutMargin(*st), nil
+	}
+	f, err := os.Open(name) // #nosec G304 -- the user's own style file
+	if err != nil {
+		return gansi.StyleConfig{}, fmt.Errorf("markdown style %q: not a standard style and not readable: %w", name, err)
+	}
+	defer func() { _ = f.Close() }()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return gansi.StyleConfig{}, fmt.Errorf("markdown style %q: not a regular file", name)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, MaxStyleBytes+1))
+	if err != nil {
+		return gansi.StyleConfig{}, fmt.Errorf("markdown style %q: %w", name, err)
+	}
+	if len(data) > MaxStyleBytes {
+		return gansi.StyleConfig{}, fmt.Errorf("markdown style %q: larger than %d bytes", name, MaxStyleBytes)
+	}
+	var st gansi.StyleConfig
+	if err := json.Unmarshal(data, &st); err != nil {
+		return gansi.StyleConfig{}, fmt.Errorf("markdown style %q: %w", name, err)
+	}
+	return withoutMargin(st), nil
+}
 
 // controlReferences matches numeric character references, which Markdown
 // decodes into characters after the input was sanitized.
@@ -133,20 +176,31 @@ func plainLines(s string) []string {
 	return strings.Split(strings.TrimRight(s, "\n"), "\n")
 }
 
-// RenderMarkdown renders Markdown wrapped to the width. The input is
+// RenderMarkdown renders Markdown with the default style; see
+// MarkdownRenderer.
+func RenderMarkdown(src string, width int) []string {
+	return renderWithStyle(src, width, markdownStyle)
+}
+
+// MarkdownRenderer returns a function rendering Markdown with the style.
+func MarkdownRenderer(style gansi.StyleConfig) func(src string, width int) []string {
+	return func(src string, width int) []string { return renderWithStyle(src, width, style) }
+}
+
+// renderWithStyle renders Markdown wrapped to the width. The input is
 // sanitized before rendering, and the output keeps only text, newlines, SGR
 // styling and hyperlinks, so the document cannot inject other terminal
 // sequences (for example through character references). Documents larger
 // than MaxRenderBytes, or ones glamour cannot render, are returned as
 // sanitized plain text.
-func RenderMarkdown(src string, width int) []string {
+func renderWithStyle(src string, width int, style gansi.StyleConfig) []string {
 	src = Sanitize(src)
 	plain := func() []string { return plainLines(src) }
 	src = controlReferences.ReplaceAllStringFunc(src, neutralizeReference)
 	if len(src) > MaxRenderBytes || width < 1 {
 		return plain()
 	}
-	r, err := glamour.NewTermRenderer(glamour.WithStyles(markdownStyle), glamour.WithWordWrap(width))
+	r, err := glamour.NewTermRenderer(glamour.WithStyles(style), glamour.WithWordWrap(width))
 	if err != nil {
 		return plain()
 	}
