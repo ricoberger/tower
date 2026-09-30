@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -233,7 +235,7 @@ func (m *Model) previewContent(width, height int) string {
 	if m.help {
 		logical = helpLines()
 	} else {
-		logical = m.previewLines()
+		logical = m.previewLines(width)
 	}
 	var lines []string
 	for _, l := range logical {
@@ -258,8 +260,9 @@ func section(title string) string {
 	return lipgloss.NewStyle().Bold(true).Foreground(Mauve).Render(title)
 }
 
-// previewLines builds the unwrapped preview of the selected item.
-func (m *Model) previewLines() []string {
+// previewLines builds the preview of the selected item. Markdown documents
+// are rendered for the width; other lines are wrapped by the caller.
+func (m *Model) previewLines(width int) []string {
 	v, ok := m.selectedView()
 	if !ok {
 		if !m.hasSnap {
@@ -269,7 +272,8 @@ func (m *Model) previewLines() []string {
 	}
 	it := v.Item
 	r, hasRun := v.Latest()
-	lines := []string{Bold(SanitizeLine(it.Title)), m.metaLine(v), ""}
+	// The title is shown in the frame border.
+	lines := []string{m.metaLine(v), ""}
 	if !hasRun {
 		switch it.State {
 		case item.StateNew:
@@ -280,7 +284,7 @@ func (m *Model) previewLines() []string {
 		default:
 			lines = append(lines, "No preparation run yet. Press p to prepare now.")
 		}
-		return lines
+		return append(append(lines, ""), m.alertLines(it.ID, width)...)
 	}
 	switch r.Outcome {
 	case item.OutcomeRunning:
@@ -303,7 +307,7 @@ func (m *Model) previewLines() []string {
 		}
 		return lines
 	case item.OutcomeReady, item.OutcomeBlocked:
-		return append(lines, m.resultLines(it.ID, r)...)
+		return append(lines, m.resultLines(it.ID, r, width)...)
 	default:
 		return append(lines, m.failureLines(it.ID, r)...)
 	}
@@ -348,21 +352,41 @@ func (m *Model) loadedFor(id string, r item.Run) bool {
 	return m.art.key == previewKey{id: id, run: r.Number, outcome: r.Outcome}
 }
 
-// resultLines renders a ready/blocked run: summary, gate question, proposed
-// actions, assumptions and the raw report.
-func (m *Model) resultLines(id string, r item.Run) []string {
+// alertLines renders the alert.md of an item without a run.
+func (m *Model) alertLines(id string, width int) []string {
+	d := m.alert
+	switch {
+	case d.id != id:
+		return []string{Dim("Loading alert.md…")}
+	case errors.Is(d.err, fs.ErrNotExist):
+		return []string{Dim("No alert.md yet.")}
+	case d.err != nil:
+		return []string{Dim("alert.md: " + SanitizeLine(d.err.Error()))}
+	}
+	return m.markdownLines(d.text, width)
+}
+
+// resultLines renders a ready/blocked run: the rendered report, then the
+// summary, gate question, proposed actions and assumptions of result.json.
+func (m *Model) resultLines(id string, r item.Run, width int) []string {
 	if !m.loadedFor(id, r) {
 		return []string{Dim("Loading report…")}
 	}
 	a := m.art
 	var lines []string
+	if r.Outcome == item.OutcomeBlocked && a.result != nil {
+		lines = append(lines, Colored("yellow", "Blocked: the preparation needs input before it can continue."), "")
+	}
+	if a.reportErr != nil {
+		lines = append(lines, Colored("red", "report.md: "+SanitizeLine(a.reportErr.Error())))
+	} else {
+		lines = append(lines, m.markdownLines(a.report, width)...)
+	}
+	lines = append(lines, "")
 	if a.resultErr != nil {
 		lines = append(lines, Colored("red", "result.json: "+SanitizeLine(a.resultErr.Error())), "")
 	}
 	if res := a.result; res != nil {
-		if r.Outcome == item.OutcomeBlocked {
-			lines = append(lines, Colored("yellow", "Blocked: the preparation needs input before it can continue."), "")
-		}
 		lines = append(lines, section("Summary"))
 		lines = append(lines, strings.Split(Sanitize(res.Summary), "\n")...)
 		if res.RootCause != "" {
@@ -397,13 +421,6 @@ func (m *Model) resultLines(id string, r item.Run) []string {
 		for _, as := range res.Assumptions {
 			lines = append(lines, "• "+SanitizeLine(as))
 		}
-		lines = append(lines, "")
-	}
-	lines = append(lines, section("Report"))
-	if a.reportErr != nil {
-		lines = append(lines, Colored("red", "report.md: "+SanitizeLine(a.reportErr.Error())))
-	} else {
-		lines = append(lines, strings.Split(strings.TrimRight(Sanitize(a.report), "\n"), "\n")...)
 	}
 	return lines
 }

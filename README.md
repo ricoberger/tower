@@ -263,12 +263,23 @@ and credentials live in one place:
 Run `tower`. The header shows each source's health (last successful poll,
 last error or "never polled") and the runner (`running X/Y · queued N`). The
 list is grouped by state; within a group, items are sorted by severity order,
-then oldest first. Unseen items are bold. The preview shows the selected
-item: metadata, summary, root cause, the gate question with its options,
-proposed actions, assumptions and the full `report.md`. While a run executes,
-it shows the elapsed time and the latest Copilot message; for a failed run,
-the error and the last 20 lines of `stderr.log` in full (if those lines
-together exceed 16 MiB, the preview says so instead; open the log with `l`).
+then oldest first. Unseen items are bold. The preview frame is titled with
+the selected item and shows its metadata, then:
+
+- for a ready or blocked run, the rendered `report.md` followed by the
+  `result.json` summary, root cause, gate question with its options, proposed
+  actions and assumptions;
+- for an item without a run, the rendered `alert.md` (reread when it
+  changes; a missing or unreadable file is shown as a hint);
+- while a run executes, the elapsed time and the latest Copilot message;
+- for a failed run, the error and the last 20 lines of `stderr.log` in full
+  (if those lines together exceed 16 MiB, the preview says so instead; open
+  the log with `l`).
+
+Markdown is rendered with [glamour](https://github.com/charmbracelet/glamour)
+and wrapped to the preview width. Report and alert content is sanitized: only
+text, colors and hyperlinks reach the terminal, never other escape sequences.
+Documents over 1 MiB are shown as plain text; files over 16 MiB are not read.
 
 The latest Copilot message comes from the last 256 KiB of the run's
 `output.jsonl`; the file is only reread when its size or modification time
@@ -308,6 +319,9 @@ run's result is not affected.
   `resumed-session`. `p` and `x` are validated by the engine, which records
   `manual-run` and `dismissed`; rejections become footer hints. `l`, `a` and
   `b` record nothing. Failed actions never record history.
+- **Footer hints.** Results and errors of actions are shown in the footer
+  for 5 seconds, then the footer returns to the key hints. Confirmations stay
+  until they are answered.
 - **Engine requests never block the UI.** A slow poll or a busy engine only
   delays the footer result; navigation keeps working.
 

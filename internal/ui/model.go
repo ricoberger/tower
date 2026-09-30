@@ -41,6 +41,7 @@ type Engine interface {
 // artifact reads and action recording.
 type Store interface {
 	RunFiles
+	AlertFiles
 	ItemPath(id string) (string, error)
 	RunPath(id string, n int) (string, error)
 	HasRunFile(id string, n int, name string) (bool, error)
@@ -136,6 +137,8 @@ type artifactsMsg artifacts
 
 type progressMsg progress
 
+type alertMsg alertDoc
+
 // editorDoneMsg reports an editor exit; record is set for report opens.
 type editorDoneMsg struct {
 	what   string
@@ -183,6 +186,12 @@ type Model struct {
 	// progLoading is set while a progress read is in flight.
 	prog        progress
 	progLoading *previewKey
+	// alert is the alert.md of the selected item without a run;
+	// alertLoading is set while an alert.md read is in flight.
+	alert        alertDoc
+	alertLoading bool
+	// md caches the rendered Markdown of the preview.
+	md mdCache
 }
 
 // New returns the model. ctx bounds all background requests.
@@ -262,6 +271,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if key, ok := m.wantKey(); ok && key.id == msg.id && key.run == msg.run {
 			m.prog = progress(msg)
 		}
+		return m, nil
+	case alertMsg:
+		m.alertLoading = false
+		id, ok := m.wantAlert()
+		if !ok {
+			return m, nil
+		}
+		if id != msg.id {
+			// The selection changed while the read was in flight.
+			return m, m.loadPreview()
+		}
+		m.alert = alertDoc(msg)
 		return m, nil
 	}
 	return m, nil
@@ -416,14 +437,38 @@ func (m *Model) wantKey() (previewKey, bool) {
 	return previewKey{id: v.Item.ID, run: r.Number, outcome: r.Outcome}, true
 }
 
-// loadPreview starts the artifact or progress read the selection needs, off
-// the update loop. At most one read of each kind is in flight.
+// wantAlert returns the item whose alert.md the preview shows: the
+// selected item when it has no run.
+func (m *Model) wantAlert() (string, bool) {
+	v, ok := m.selectedView()
+	if !ok {
+		return "", false
+	}
+	if _, hasRun := v.Latest(); hasRun {
+		return "", false
+	}
+	return v.Item.ID, true
+}
+
+// loadPreview starts the artifact, progress or alert.md read the selection
+// needs, off the update loop. At most one read of each kind is in flight.
 func (m *Model) loadPreview() tea.Cmd {
-	key, ok := m.wantKey()
-	if !ok || m.opts.Store == nil {
+	if m.opts.Store == nil {
 		return nil
 	}
 	files := m.opts.Store
+	if id, ok := m.wantAlert(); ok {
+		if m.alertLoading {
+			return nil
+		}
+		m.alertLoading = true
+		prev := m.alert
+		return func() tea.Msg { return alertMsg(loadAlert(files, prev, id)) }
+	}
+	key, ok := m.wantKey()
+	if !ok {
+		return nil
+	}
 	if key.outcome == item.OutcomeRunning {
 		if m.progLoading != nil {
 			return nil

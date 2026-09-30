@@ -60,6 +60,54 @@ type artifacts struct {
 	stderrErr error
 }
 
+// AlertFiles reads an item's alert.md through the store's safe accessor.
+type AlertFiles interface {
+	OpenAlertMarkdown(id string) (*os.File, error)
+}
+
+// alertDoc is the cached alert.md of an item without a run.
+type alertDoc struct {
+	id string
+	// known is true once the file was read; size and mod identify the
+	// read version.
+	known bool
+	size  int64
+	mod   time.Time
+	text  string
+	err   error
+}
+
+// loadAlert refreshes the alert.md of an item. The file is only read when
+// its size or modification time differs from prev, and never more than
+// item.MaxRunFileSize bytes.
+func loadAlert(files AlertFiles, prev alertDoc, id string) alertDoc {
+	d := prev
+	if d.id != id {
+		d = alertDoc{id: id}
+	}
+	d.err = nil
+	f, err := files.OpenAlertMarkdown(id)
+	if err != nil {
+		return alertDoc{id: id, err: err}
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return alertDoc{id: id, err: err}
+	}
+	if d.known && fi.Size() == d.size && fi.ModTime().Equal(d.mod) {
+		return d
+	}
+	data, err := io.ReadAll(io.LimitReader(f, item.MaxRunFileSize+1))
+	if err != nil {
+		return alertDoc{id: id, err: err}
+	}
+	if len(data) > item.MaxRunFileSize {
+		return alertDoc{id: id, err: fmt.Errorf("alert.md is larger than %d bytes", item.MaxRunFileSize)}
+	}
+	return alertDoc{id: id, known: true, size: fi.Size(), mod: fi.ModTime(), text: string(data)}
+}
+
 // progress is the cached progress line of an executing run.
 type progress struct {
 	id  string

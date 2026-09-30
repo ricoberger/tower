@@ -749,19 +749,31 @@ func TestPreparedPreview(t *testing.T) {
 	f := newFixture(t, nil)
 	a := f.add("a", item.StateNeedsYou, "critical", t0.Add(-time.Hour), finishedRun(1, item.OutcomeReady, t0.Add(-time.Hour)))
 	b := f.add("b", item.StateNeedsYou, "critical", t0, finishedRun(1, item.OutcomeBlocked, t0.Add(-time.Hour)))
-	report := "# Report\n\n" + strings.Repeat("line of the report\n", 80) + "END OF REPORT\n"
+	report := "# Report\n\n" + strings.Repeat("line of the report\n\n", 80) + "END OF REPORT\n"
 	f.writeRunFile(a, 1, item.ResultFile, readyResult)
 	f.writeRunFile(a, 1, item.ReportFile, report)
 	f.writeRunFile(b, 1, item.ResultFile, blockedResult)
 	f.writeRunFile(b, 1, item.ReportFile, "blocked report\n")
 	f.snapshot()
 
-	lines := strings.Join(f.d.m.previewLines(), "\n")
+	lines := strings.Join(f.d.m.previewLines(80), "\n")
 	lines = ansi.Strip(lines)
-	order := []string{"Alert a", "critical · dev · firing 1h", "run 1 ready", "high confidence",
+	// The rendered report comes first, then the result.json sections. The
+	// title is only shown in the frame border.
+	if strings.Contains(lines, "Alert a") {
+		t.Fatalf("preview body repeats the title:\n%s", lines)
+	}
+	if !strings.Contains(f.view(), "Alert a") {
+		t.Fatal("frame border lacks the title")
+	}
+	order := []string{"critical · dev · firing 1h", "run 1 ready", "high confidence",
+		"Report", "line of the report", "END OF REPORT",
 		"Summary", "Pods crash on start.", "Root cause", "Question", "Roll back?", "1) Roll back", "2) Wait",
 		"Proposed actions", "1. rollback  Roll back api", "Revert to v1.", "kubectl rollout undo",
-		"Assumptions", "The deploy at 10:00 caused it.", "Report", "# Report", "END OF REPORT"}
+		"Assumptions", "The deploy at 10:00 caused it."}
+	if strings.Contains(lines, "# Report") {
+		t.Fatalf("report heading not rendered:\n%s", lines)
+	}
 	pos := 0
 	for _, s := range order {
 		i := strings.Index(lines[pos:], s)
@@ -770,28 +782,34 @@ func TestPreparedPreview(t *testing.T) {
 		}
 		pos += i + len(s)
 	}
-	// The report is scrollable in preview focus; G reaches its end.
-	if strings.Contains(f.view(), "END OF REPORT") {
-		t.Fatal("report end visible without scrolling")
+	// The preview is scrollable in preview focus; j reaches its end, the
+	// last result.json section.
+	const end = "caused it."
+	if strings.Contains(f.view(), end) {
+		t.Fatal("preview end visible without scrolling")
 	}
 	f.d.keys("tab")
 	f.d.keys(slices.Repeat([]string{"j"}, 200)...)
-	if !strings.Contains(f.view(), "END OF REPORT") || f.d.m.SelectedID() != a {
+	if !strings.Contains(f.view(), end) || f.d.m.SelectedID() != a {
 		t.Fatal("j did not scroll to the end")
 	}
-	// Resizing recomputes wrapping and the scroll bounds.
+	// Resizing re-renders the report for the new width and recomputes the
+	// scroll bounds.
 	f.d.send(tea.WindowSizeMsg{Width: 60, Height: 20})
 	f.d.keys(slices.Repeat([]string{"j"}, 200)...)
-	if !strings.Contains(f.view(), "END OF REPORT") {
+	if !strings.Contains(f.view(), end) {
 		t.Fatal("scrolling after a resize")
 	}
+	if w, _ := FrameContentSize(60-24, 18); f.d.m.md.width != w {
+		t.Fatalf("report rendered for width %d, want %d", f.d.m.md.width, w)
+	}
 	f.d.send(tea.WindowSizeMsg{Width: 200, Height: 60})
-	if v := f.view(); !strings.Contains(v, "END OF REPORT") || !strings.Contains(v, "line of the report") {
+	if v := f.view(); !strings.Contains(v, end) || !strings.Contains(v, "END OF REPORT") || !strings.Contains(v, "line of the report") {
 		t.Fatal("scroll bound not recomputed after growing")
 	}
 
 	f.d.keys("tab", "j")
-	lines = ansi.Strip(strings.Join(f.d.m.previewLines(), "\n"))
+	lines = ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
 	for _, s := range []string{"Blocked", "Missing access.", "Which cluster?", "Proposed actions\nnone", "Assumptions\nnone", "blocked report"} {
 		if !strings.Contains(lines, s) {
 			t.Errorf("blocked preview lacks %q:\n%s", s, lines)
@@ -811,12 +829,12 @@ func TestPreviewArtifactErrors(t *testing.T) {
 	f.add("a", item.StateNeedsYou, "critical", t0.Add(-time.Hour), finishedRun(1, item.OutcomeReady, t0.Add(-time.Hour)))
 	f.add("b", item.StateNew, "critical", t0)
 	f.snapshot()
-	lines := ansi.Strip(strings.Join(f.d.m.previewLines(), "\n"))
+	lines := ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
 	if !strings.Contains(lines, "result.json:") || !strings.Contains(lines, "report.md:") {
 		t.Fatalf("missing artifacts not shown:\n%s", lines)
 	}
 	f.d.keys("j")
-	lines = ansi.Strip(strings.Join(f.d.m.previewLines(), "\n"))
+	lines = ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
 	if !strings.Contains(lines, "No preparation run yet") || !strings.Contains(lines, "no run") {
 		t.Fatalf("no-run preview:\n%s", lines)
 	}
@@ -838,7 +856,7 @@ func TestFailurePreview(t *testing.T) {
 	f.writeRunFile(b, 2, item.StderrFile, "only\nthree\nlines")
 	f.snapshot()
 
-	lines := ansi.Strip(strings.Join(f.d.m.previewLines(), "\n"))
+	lines := ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
 	if !strings.Contains(lines, "Run 1 failed: copilot exited with code 1") {
 		t.Fatalf("no error:\n%s", lines)
 	}
@@ -852,7 +870,7 @@ func TestFailurePreview(t *testing.T) {
 		t.Fatal("failed run shown as a report")
 	}
 	f.d.keys("j")
-	lines = ansi.Strip(strings.Join(f.d.m.previewLines(), "\n"))
+	lines = ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
 	if !strings.Contains(lines, "Run 2 interrupted: tower was not running") || !strings.Contains(lines, "only\nthree\nlines") {
 		t.Fatalf("interrupted preview:\n%s", lines)
 	}
@@ -863,7 +881,7 @@ func TestFailurePreview(t *testing.T) {
 	if f.d.m.SelectedID() != c {
 		t.Fatal("select c")
 	}
-	lines = ansi.Strip(strings.Join(f.d.m.previewLines(), "\n"))
+	lines = ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
 	if !strings.Contains(lines, "stderr.log:") {
 		t.Fatalf("missing log not shown:\n%s", lines)
 	}
@@ -878,7 +896,7 @@ func TestRunningPreviewProgress(t *testing.T) {
 	f := newFixture(t, nil)
 	a := f.add("a", item.StatePreparing, "critical", t0.Add(-time.Hour), runningRun(1, t0.Add(-90*time.Second)))
 	f.snapshot()
-	lines := ansi.Strip(strings.Join(f.d.m.previewLines(), "\n"))
+	lines := ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
 	if !strings.Contains(lines, "Preparing run 1 · elapsed 1m30s") || !strings.Contains(lines, "No assistant message yet") {
 		t.Fatalf("running preview:\n%s", lines)
 	}
@@ -888,7 +906,7 @@ func TestRunningPreviewProgress(t *testing.T) {
 		`{"type":"tool.execution_start","data":{"content":"tool"}}`+"\n"+`{"type":"assistant.message","data":{"content":"partial`)
 	f.now = t0.Add(time.Second)
 	f.d.send(HeartbeatMsg(f.now))
-	lines = ansi.Strip(strings.Join(f.d.m.previewLines(), "\n"))
+	lines = ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
 	if !strings.Contains(lines, "› Checking the pods") || !strings.Contains(lines, "elapsed 1m31s") {
 		t.Fatalf("progress:\n%s", lines)
 	}
@@ -905,7 +923,7 @@ func TestStaleArtifactResultsAreDropped(t *testing.T) {
 	late := loadArtifacts(f.store, previewKey{id: a, run: 1, outcome: item.OutcomeReady})
 	f.d.keys("j")
 	f.d.send(artifactsMsg(late))
-	lines := strings.Join(f.d.m.previewLines(), "\n")
+	lines := ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
 	if strings.Contains(lines, "report A") || !strings.Contains(lines, "report B") {
 		t.Fatalf("stale preview:\n%s", lines)
 	}
@@ -1167,5 +1185,110 @@ func TestFooterHintsClearAfterTimeout(t *testing.T) {
 	heartbeat(time.Hour + HintTimeout)
 	if f.d.m.Footer() != "" {
 		t.Fatalf("hint not cleared: %q", f.d.m.Footer())
+	}
+}
+
+func TestAlertMarkdownPreview(t *testing.T) {
+	f := newFixture(t, nil)
+	a := f.add("a", item.StateNew, "critical", t0)
+	b := f.add("b", item.StateNew, "critical", t0.Add(time.Second))
+	c := f.add("c", item.StateNew, "critical", t0.Add(2*time.Second))
+	d := f.add("d", item.StateNeedsYou, "critical", t0.Add(3*time.Second), finishedRun(1, item.OutcomeReady, t0))
+	if err := f.store.WriteAlertMarkdown(a, []byte("# Pod crash\n\n**Firing** since noon \x1b]52;c;aGk=\x07&#27;[2J.\n\n- `namespace`: prod\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.store.WriteAlertMarkdown(d, []byte("# Not shown\n")); err != nil {
+		t.Fatal(err)
+	}
+	itemPath, _ := f.store.ItemPath(c)
+	if err := os.Symlink("item.yaml", filepath.Join(itemPath, "alert.md")); err != nil {
+		t.Fatal(err)
+	}
+	f.writeRunFile(d, 1, item.ReportFile, "the report\n")
+	f.snapshot()
+
+	// Items with a run show the run, not alert.md.
+	if f.d.m.SelectedID() != d {
+		t.Fatalf("selected %s", f.d.m.SelectedID())
+	}
+	lines := ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
+	if strings.Contains(lines, "Not shown") || !strings.Contains(lines, "the report") {
+		t.Fatalf("preview of an item with a run:\n%s", lines)
+	}
+
+	// Items without a run show their rendered alert.md below the status.
+	f.d.keys("j")
+	if f.d.m.SelectedID() != a {
+		t.Fatalf("selected %s", f.d.m.SelectedID())
+	}
+	lines = ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n"))
+	order := []string{"critical · dev", "no run", "No preparation run yet", "Pod crash", "Firing since noon", "•", "namespace", ": prod"}
+	pos := 0
+	for _, s := range order {
+		i := strings.Index(lines[pos:], s)
+		if i < 0 {
+			t.Fatalf("preview lacks %q after position %d:\n%s", s, pos, lines)
+		}
+		pos += i + len(s)
+	}
+	for _, s := range []string{"# Pod crash", "**", "Alert a"} {
+		if strings.Contains(lines, s) {
+			t.Errorf("preview contains %q:\n%s", s, lines)
+		}
+	}
+	raw := f.d.m.Render()
+	assertOnlySafeSequences(t, raw)
+	if strings.Contains(raw, "\x1b]52") || strings.Contains(raw, "\x1b[2J") {
+		t.Fatalf("alert.md injected a terminal sequence: %q", raw)
+	}
+
+	// A changed alert.md is read again on the next heartbeat.
+	if err := f.store.WriteAlertMarkdown(a, []byte("# Pod crash\n\nStill firing after the rollout.\n")); err != nil {
+		t.Fatal(err)
+	}
+	f.d.send(HeartbeatMsg(f.now))
+	if lines := ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n")); !strings.Contains(lines, "Still firing after the rollout.") {
+		t.Fatalf("changed alert.md not shown:\n%s", lines)
+	}
+
+	// A missing or unreadable alert.md is a hint, not an error.
+	f.d.keys("j")
+	if f.d.m.SelectedID() != b {
+		t.Fatalf("selected %s", f.d.m.SelectedID())
+	}
+	if lines := ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n")); !strings.Contains(lines, "No alert.md yet.") {
+		t.Fatalf("missing alert.md:\n%s", lines)
+	}
+	f.d.keys("j")
+	if lines := ansi.Strip(strings.Join(f.d.m.previewLines(80), "\n")); !strings.Contains(lines, "alert.md: alert.md is not a regular file") {
+		t.Fatalf("symlinked alert.md:\n%s", lines)
+	}
+	if f.d.m.SelectedID() != c {
+		t.Fatalf("selected %s", f.d.m.SelectedID())
+	}
+}
+
+func TestMarkdownRenderedOnlyWhenInputsChange(t *testing.T) {
+	f := newFixture(t, nil)
+	a := f.add("a", item.StateNeedsYou, "critical", t0, finishedRun(1, item.OutcomeReady, t0))
+	f.writeRunFile(a, 1, item.ReportFile, "# Report\n\nbody\n")
+	f.snapshot()
+	_ = f.d.m.Render()
+	first := f.d.m.md.lines
+	if len(first) == 0 {
+		t.Fatal("report not rendered")
+	}
+	for i := range 3 {
+		f.now = t0.Add(time.Duration(i+1) * time.Second)
+		f.d.send(HeartbeatMsg(f.now))
+		_ = f.d.m.Render()
+	}
+	if &f.d.m.md.lines[0] != &first[0] {
+		t.Fatal("report rendered again without a change")
+	}
+	f.d.send(tea.WindowSizeMsg{Width: 100, Height: 40})
+	_ = f.d.m.Render()
+	if &f.d.m.md.lines[0] == &first[0] {
+		t.Fatal("report not rendered again after a resize")
 	}
 }
