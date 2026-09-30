@@ -2,8 +2,13 @@ package item
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -156,5 +161,63 @@ func TestAlertMarkdownWaitsForItemLock(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("write did not proceed after unlock")
+	}
+}
+
+func TestOpenAlertMarkdown(t *testing.T) {
+	s := openStore(t)
+	it := newItem(t, key, 1)
+	if err := s.Create(it, json.RawMessage(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OpenAlertMarkdown(it.ID); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("missing alert.md: err = %v", err)
+	}
+	if err := s.WriteAlertMarkdown(it.ID, []byte("# alert\n")); err != nil {
+		t.Fatal(err)
+	}
+	f, err := s.OpenAlertMarkdown(it.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(f)
+	_ = f.Close()
+	if err != nil || string(data) != "# alert\n" {
+		t.Fatalf("alert.md = %q, %v", data, err)
+	}
+	if _, err := s.OpenAlertMarkdown("../x"); err == nil {
+		t.Fatal("invalid ID accepted")
+	}
+
+	// A symlinked alert.md is rejected, even when it points inside the store.
+	md := filepath.Join(s.ItemDir(it.ID), "alert.md")
+	if err := os.Remove(md); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("item.yaml", md); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OpenAlertMarkdown(it.ID); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("symlinked alert.md: err = %v", err)
+	}
+
+	// A FIFO is rejected without blocking.
+	if err := os.Remove(md); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(md, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OpenAlertMarkdown(it.ID); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("FIFO alert.md: err = %v", err)
+	}
+
+	// A symlinked item directory is rejected.
+	other := newItem(t, key, 2)
+	if err := os.Symlink(s.ItemDir(it.ID), s.ItemDir(other.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OpenAlertMarkdown(other.ID); err == nil {
+		t.Fatal("symlinked item directory accepted")
 	}
 }

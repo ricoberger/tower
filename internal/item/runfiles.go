@@ -223,10 +223,16 @@ func (s *Store) OpenRunFile(id string, n int, name string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	return s.openChecked(runRel(id, n, name), name, want)
+}
+
+// openChecked opens the regular file rel for reading and verifies that it is
+// the file described by want, which the caller obtained with Lstat.
+func (s *Store) openChecked(rel, name string, want fs.FileInfo) (*os.File, error) {
 	// O_NONBLOCK: opening a FIFO (or another special file) swapped in after
 	// the check must not block before its type is checked; it has no effect
 	// on regular files. O_NOFOLLOW rejects a symlink swapped in meanwhile.
-	f, err := s.root.OpenFile(runRel(id, n, name), os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
+	f, err := s.root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -314,6 +320,33 @@ func (s *Store) ReadAlertMarkdown(id string) ([]byte, error) {
 		return nil, err
 	}
 	return s.root.ReadFile(itemRel(id, markdownFile))
+}
+
+// OpenAlertMarkdown opens alert.md of an item for reading with the checks of
+// OpenRunFile: the items and item directories must be real directories and
+// alert.md a regular file, not a symlink.
+func (s *Store) OpenAlertMarkdown(id string) (*os.File, error) {
+	if _, _, err := ParseID(id); err != nil {
+		return nil, err
+	}
+	for _, rel := range []string{itemsDir, itemRel(id)} {
+		fi, err := s.root.Lstat(rel)
+		if err != nil {
+			return nil, err
+		}
+		if !fi.IsDir() {
+			return nil, errors.New("unsafe item directory")
+		}
+	}
+	rel := itemRel(id, markdownFile)
+	fi, err := s.root.Lstat(rel)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", markdownFile)
+	}
+	return s.openChecked(rel, markdownFile, fi)
 }
 
 // AlertMarkdownPath returns the absolute path of an item's alert.md after the
