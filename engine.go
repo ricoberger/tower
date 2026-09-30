@@ -328,6 +328,10 @@ func (e *engine) run(ctx context.Context, opts engineOptions, findings config.Ex
 		case w := <-e.runner.WaitC():
 			e.handleCompletions(e.runner.HandleWait(w))
 			e.schedule()
+		case o := <-e.runner.OwnershipC():
+			// Ownership checks of re-attached runs run off the loop.
+			e.handleCompletions(e.runner.HandleOwnership(o))
+			e.schedule()
 		case <-monitorC:
 			e.handleCompletions(e.runner.Check())
 			e.schedule()

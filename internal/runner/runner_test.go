@@ -222,7 +222,8 @@ func start(t *testing.T, r *Runner, it *item.Item, n int) item.Run {
 	return run
 }
 
-// drive processes Wait results and periodic checks until cond holds.
+// drive processes Wait results, ownership check results and periodic checks
+// until cond holds.
 func drive(t *testing.T, r *Runner, useWait bool, cond func([]Completion) bool) []Completion {
 	t.Helper()
 	var all []Completion
@@ -237,6 +238,8 @@ func drive(t *testing.T, r *Runner, useWait bool, cond func([]Completion) bool) 
 		select {
 		case w := <-waitC:
 			all = append(all, r.HandleWait(w)...)
+		case o := <-r.OwnershipC():
+			all = append(all, r.HandleOwnership(o)...)
 		case <-tick.C:
 			all = append(all, r.Check()...)
 		case <-deadline:
@@ -1197,5 +1200,265 @@ func TestCloseDoesNotWaitOrSignal(t *testing.T) {
 	}
 	if err := syscall.Kill(-run.PID, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// gatedOwns is an ownership check that, once gated, blocks until the test
+// releases it with a verdict (true: the real check decides).
+type gatedOwns struct {
+	calls   atomic.Int32
+	gated   atomic.Bool
+	entered chan struct{}
+	release chan bool
+}
+
+func newGatedOwns() *gatedOwns {
+	return &gatedOwns{entered: make(chan struct{}, 8), release: make(chan bool)}
+}
+
+func (g *gatedOwns) owns(pid int, sid string) bool {
+	g.calls.Add(1)
+	if !g.gated.Load() {
+		return ProcessOwns(pid, sid)
+	}
+	g.entered <- struct{}{}
+	if !<-g.release {
+		return false
+	}
+	return ProcessOwns(pid, sid)
+}
+
+func (g *gatedOwns) waitEntered(t *testing.T) {
+	t.Helper()
+	select {
+	case <-g.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ownership check not started")
+	}
+}
+
+// release unblocks the in-flight check after delay and returns its result.
+func (g *gatedOwns) resolve(t *testing.T, r *Runner, delay time.Duration, owned bool) OwnershipResult {
+	t.Helper()
+	go func() {
+		time.Sleep(delay)
+		g.release <- owned
+	}()
+	select {
+	case res := <-r.OwnershipC():
+		return res
+	case <-time.After(delay + 10*time.Second):
+		t.Fatal("no ownership result")
+	}
+	return OwnershipResult{}
+}
+
+// swallowTerm records signals; TERM is recorded but not delivered so KILL
+// escalation is needed.
+func swallowTerm(sigs *signalRecorder) func(int, syscall.Signal) error {
+	return func(pid int, sig syscall.Signal) error {
+		if sig == syscall.SIGTERM {
+			sigs.mu.Lock()
+			sigs.sigs = append(sigs.sigs, sig)
+			sigs.mu.Unlock()
+			return nil
+		}
+		return sigs.signal(pid, sig)
+	}
+}
+
+// TestReattachedOwnershipCheckOffLoop verifies that the ownership check
+// before signalling a re-attached run does not block Check, HandleWait or
+// Cancel, that only one check is in flight per run, and that every signal
+// (TERM and the KILL escalation) is preceded by its own fresh check.
+func TestReattachedOwnershipCheckOffLoop(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_COPILOT_MODE", "hang")
+	it := e.item(t, "abc", 1)
+	run := startDetached(t, e, it)
+	owns, sigs := newGatedOwns(), &signalRecorder{}
+	r := e.runner(t, func(o *Options) {
+		o.Owns = owns.owns
+		o.Signal = swallowTerm(sigs)
+	})
+	if adopted, _ := r.Recover(it.ID, "dev", e.meta(t, it.ID, 1)); !adopted {
+		t.Fatal("not adopted")
+	}
+	before := owns.calls.Load()
+	owns.gated.Store(true)
+	e.clock.Advance(2 * time.Hour)
+
+	// The timed-out run starts one check; repeated checks, cancellation
+	// and another run's Wait result are handled while it blocks.
+	for range 10 {
+		begin := time.Now()
+		if c := r.Check(); len(c) != 0 {
+			t.Fatalf("completions while verifying: %+v", c)
+		}
+		if d := time.Since(begin); d > time.Second {
+			t.Fatalf("Check blocked for %s", d)
+		}
+	}
+	r.Cancel(it.ID, 1)
+	owns.waitEntered(t)
+	t.Setenv("FAKE_COPILOT_MODE", "ready")
+	other := e.item(t, "def", 1)
+	start(t, r, other, 1)
+	var got []Completion
+	deadline := time.After(15 * time.Second)
+	for len(got) == 0 {
+		select {
+		case w := <-r.WaitC():
+			got = append(got, r.HandleWait(w)...)
+		case <-time.After(20 * time.Millisecond):
+			got = append(got, r.Check()...)
+		case <-deadline:
+			t.Fatal("the other run did not complete")
+		}
+	}
+	if got[0].ItemID != other.ID || got[0].Run.Outcome != item.OutcomeReady {
+		t.Fatalf("completions = %+v", got)
+	}
+	if n := owns.calls.Load(); n != before+1 {
+		t.Fatalf("ownership checks = %d, want %d", n, before+1)
+	}
+	if s := sigs.list(); len(s) != 0 {
+		t.Fatalf("signalled before the check returned: %v", s)
+	}
+
+	// TERM is sent only when the check returns true.
+	c := r.HandleOwnership(owns.resolve(t, r, 100*time.Millisecond, true))
+	if s := sigs.list(); !slices.Equal(s, []syscall.Signal{syscall.SIGTERM}) {
+		t.Fatalf("signals = %v", s)
+	}
+	if len(c) != 0 {
+		t.Fatalf("completions = %+v", c)
+	}
+	if r.Check(); owns.calls.Load() != before+1 {
+		t.Fatal("a check started before the grace elapsed")
+	}
+
+	// KILL escalation starts its own fresh check.
+	e.clock.Advance(time.Second)
+	r.Check()
+	r.Check()
+	owns.waitEntered(t)
+	if n := owns.calls.Load(); n != before+2 || len(sigs.list()) != 1 {
+		t.Fatalf("ownership checks = %d, signals = %v", n, sigs.list())
+	}
+	r.HandleOwnership(owns.resolve(t, r, 100*time.Millisecond, true))
+	if s := sigs.list(); !slices.Equal(s, []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL}) {
+		t.Fatalf("signals = %v", s)
+	}
+	owns.gated.Store(false)
+	c = drive(t, r, true, completed(1))
+	if c[0].ItemID != it.ID || c[0].Run.Outcome != item.OutcomeFailed || c[0].Run.Error != "timeout after 1h" {
+		t.Fatalf("run = %+v", c[0].Run)
+	}
+	drive(t, r, true, r.idle)
+	if alive(syscall.Kill, -run.PID) {
+		t.Error("group survived")
+	}
+	if n := owns.calls.Load(); n != before+2 {
+		t.Errorf("ownership checks = %d, want %d", n, before+2)
+	}
+}
+
+func TestReattachedOwnershipCheckFailsAfterDelay(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_COPILOT_MODE", "hang")
+	it := e.item(t, "abc", 1)
+	startDetached(t, e, it)
+	owns, sigs := newGatedOwns(), &signalRecorder{}
+	r := e.runner(t, func(o *Options) {
+		o.Owns = owns.owns
+		o.Signal = sigs.signal
+	})
+	if adopted, _ := r.Recover(it.ID, "dev", e.meta(t, it.ID, 1)); !adopted {
+		t.Fatal("not adopted")
+	}
+	owns.gated.Store(true)
+	e.clock.Advance(2 * time.Hour)
+	if c := r.Check(); len(c) != 0 {
+		t.Fatalf("completions = %+v", c)
+	}
+	owns.waitEntered(t)
+	res := owns.resolve(t, r, 300*time.Millisecond, false)
+	c := r.HandleOwnership(res)
+	if len(c) != 1 || c[0].Run.Outcome != item.OutcomeFailed || c[0].Run.Error != "timeout after 1h" {
+		t.Fatalf("completions = %+v", c)
+	}
+	if r.Busy() != 0 {
+		t.Error("slot not released")
+	}
+	if s := sigs.list(); len(s) != 0 {
+		t.Errorf("signals sent: %v", s)
+	}
+	if m := e.meta(t, it.ID, 1); m.Outcome != item.OutcomeFailed || m.Error != "timeout after 1h" {
+		t.Errorf("persisted %+v", m)
+	}
+	if !strings.Contains(e.logs.String(), "ownership could not be verified") {
+		t.Errorf("logs:\n%s", e.logs)
+	}
+	// A late duplicate of the result is ignored.
+	if c := r.HandleOwnership(res); len(c) != 0 {
+		t.Errorf("stale result produced %+v", c)
+	}
+}
+
+func TestCloseDuringOwnershipCheck(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_COPILOT_MODE", "hang")
+	it := e.item(t, "abc", 1)
+	startDetached(t, e, it)
+	owns, sigs := newGatedOwns(), &signalRecorder{}
+	r := e.runner(t, func(o *Options) {
+		o.Owns = owns.owns
+		o.Signal = sigs.signal
+	})
+	if adopted, _ := r.Recover(it.ID, "dev", e.meta(t, it.ID, 1)); !adopted {
+		t.Fatal("not adopted")
+	}
+	owns.gated.Store(true)
+	r.Cancel(it.ID, 1)
+	owns.waitEntered(t)
+	done := make(chan struct{})
+	go func() { r.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked on the in-flight check")
+	}
+	owns.release <- true
+	finished := make(chan struct{})
+	go func() { r.checks.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the check goroutine leaked in a blocked send")
+	}
+	if s := sigs.list(); len(s) != 0 {
+		t.Errorf("signals sent after Close: %v", s)
+	}
+}
+
+func TestLocalSignalsWithoutOwnershipCheck(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_COPILOT_MODE", "hang")
+	var calls atomic.Int32
+	sigs := &signalRecorder{}
+	r := e.runner(t, func(o *Options) {
+		o.Owns = func(int, string) bool { calls.Add(1); return false }
+		o.Signal = sigs.signal
+	})
+	it := e.item(t, "abc", 1)
+	start(t, r, it, 1)
+	r.Cancel(it.ID, 1)
+	if s := sigs.list(); !slices.Equal(s, []syscall.Signal{syscall.SIGTERM}) {
+		t.Fatalf("signals = %v", s)
+	}
+	drive(t, r, true, r.idle)
+	if calls.Load() != 0 {
+		t.Errorf("ownership checks for a local run: %d", calls.Load())
 	}
 }

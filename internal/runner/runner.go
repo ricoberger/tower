@@ -82,6 +82,33 @@ type WaitResult struct {
 	state  *os.ProcessState
 }
 
+// OwnershipResult is the result of an asynchronous ownership check of a
+// re-attached run; pass it to HandleOwnership.
+type OwnershipResult struct {
+	t     *tracked
+	sig   syscall.Signal
+	phase signalPhase
+	owned bool
+}
+
+// signalPhase distinguishes the termination of an executing run from the
+// cleanup of an ended run's group; an ownership verdict only authorizes the
+// signal of the phase it was requested for.
+type signalPhase int
+
+const (
+	phaseTerminate signalPhase = iota + 1
+	phaseCleanup
+)
+
+// ownershipVerdict is the result of a completed ownership check, valid only
+// for the step that processes it.
+type ownershipVerdict struct {
+	sig   syscall.Signal
+	phase signalPhase
+	owned bool
+}
+
 // StartError is a failed start. If Run is set, the failed attempt was
 // persisted as a failed run and should be surfaced through the normal
 // failure lifecycle; otherwise nothing usable was created.
@@ -127,15 +154,22 @@ type tracked struct {
 	// cleaning is set once post-completion cleanup signalled the group.
 	cleaning bool
 	clean    bool
+	// verifying is set while the ownership check before a signal to a
+	// re-attached run is in flight; verdict is its result while the step
+	// processing it runs.
+	verifying bool
+	verdict   *ownershipVerdict
 }
 
 // Runner starts and monitors preparation runs.
 type Runner struct {
-	opts  Options
-	runs  map[string]*tracked
-	waitC chan WaitResult
-	done  chan struct{}
-	close sync.Once
+	opts   Options
+	runs   map[string]*tracked
+	waitC  chan WaitResult
+	ownsC  chan OwnershipResult
+	done   chan struct{}
+	close  sync.Once
+	checks sync.WaitGroup
 }
 
 // New returns a Runner.
@@ -168,6 +202,7 @@ func New(opts Options) *Runner {
 		opts:  opts,
 		runs:  map[string]*tracked{},
 		waitC: make(chan WaitResult),
+		ownsC: make(chan OwnershipResult),
 		done:  make(chan struct{}),
 	}
 }
@@ -176,8 +211,13 @@ func New(opts Options) *Runner {
 // HandleWait.
 func (r *Runner) WaitC() <-chan WaitResult { return r.waitC }
 
+// OwnershipC delivers the results of the ownership checks that precede
+// every signal to a re-attached run; pass them to HandleOwnership.
+func (r *Runner) OwnershipC() <-chan OwnershipResult { return r.ownsC }
+
 // Close stops the runner. Tracked processes are neither signalled nor
-// waited for; pending Wait goroutines drop their result.
+// waited for; pending Wait goroutines and ownership checks drop their
+// result.
 func (r *Runner) Close() { r.close.Do(func() { close(r.done) }) }
 
 // Busy returns the number of occupied slots: executing runs and completed
@@ -455,6 +495,22 @@ func (r *Runner) HandleWait(w WaitResult) []Completion {
 	return r.step(t, false)
 }
 
+// HandleOwnership processes the result of an ownership check. The step it
+// triggers re-evaluates whether the signal is still needed: only then is it
+// sent (verified) or is the run abandoned (not verified). The verdict is
+// never reused for a later signal.
+func (r *Runner) HandleOwnership(res OwnershipResult) []Completion {
+	t := res.t
+	if cur, ok := r.runs[t.itemID]; !ok || cur != t || !t.verifying {
+		return nil
+	}
+	t.verifying = false
+	t.verdict = &ownershipVerdict{sig: res.sig, phase: res.phase, owned: res.owned}
+	out := r.step(t, false)
+	t.verdict = nil
+	return out
+}
+
 // Check performs the periodic check of all tracked runs: completion
 // evidence, timeouts, TERM/KILL escalation and group cleanup.
 func (r *Runner) Check() []Completion {
@@ -521,23 +577,53 @@ func (r *Runner) expired(t *tracked, now time.Time) bool {
 	return r.opts.Timeout > 0 && now.Sub(start) >= r.opts.Timeout
 }
 
-// signal sends sig to the run's process group. Re-attached runs are
-// verified afresh before every signal; on failure the run is abandoned
-// without signalling. It reports whether the signal was sent.
-func (r *Runner) signal(t *tracked, sig syscall.Signal) bool {
+// signal sends sig to the run's process group and reports whether it was
+// sent. Locally started runs are signalled directly. Re-attached runs are
+// verified afresh before every signal: without a verdict for this signal
+// an asynchronous check is started (at most one per run) and the signal is
+// requested again by the step that processes its result; on a failed check
+// the run is abandoned without signalling.
+func (r *Runner) signal(t *tracked, sig syscall.Signal, phase signalPhase) bool {
 	if t.abandoned {
 		return false
 	}
-	if !t.local && !r.opts.Owns(t.run.PID, t.run.SessionID) {
-		t.abandoned = true
-		r.logger(t).Info("skipping process group signal: the re-attached run's ownership could not be verified; releasing its slot",
-			"pid", t.run.PID, "signal", sig.String())
-		return false
+	if !t.local {
+		v := t.verdict
+		t.verdict = nil
+		switch {
+		case v == nil || v.sig != sig || v.phase != phase:
+			r.verify(t, sig, phase)
+			return false
+		case !v.owned:
+			t.abandoned = true
+			r.logger(t).Info("skipping process group signal: the re-attached run's ownership could not be verified; releasing its slot",
+				"pid", t.run.PID, "signal", sig.String())
+			return false
+		}
 	}
 	if err := r.opts.Signal(-t.run.PID, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
 		r.logger(t).Warn("signal process group", "pid", t.run.PID, "signal", sig.String(), "error", err)
 	}
 	return true
+}
+
+// verify starts the asynchronous ownership check before sig unless one is
+// already in flight. The result is delivered on OwnershipC; after Close it
+// is dropped.
+func (r *Runner) verify(t *tracked, sig syscall.Signal, phase signalPhase) {
+	if t.verifying {
+		return
+	}
+	t.verifying = true
+	pid, sid, owns := t.run.PID, t.run.SessionID, r.opts.Owns
+	r.logger(t).Debug("verifying the re-attached run's ownership before signalling", "pid", pid, "signal", sig.String())
+	r.checks.Go(func() {
+		res := OwnershipResult{t: t, sig: sig, phase: phase, owned: owns(pid, sid)}
+		select {
+		case r.ownsC <- res:
+		case <-r.done:
+		}
+	})
 }
 
 // terminate sends TERM to the group of an executing run, then KILL after
@@ -547,13 +633,13 @@ func (r *Runner) terminate(t *tracked, now time.Time) {
 		return
 	}
 	if t.termAt.IsZero() {
-		if r.signal(t, syscall.SIGTERM) {
+		if r.signal(t, syscall.SIGTERM, phaseTerminate) {
 			t.termAt = now
 		}
 		return
 	}
 	if now.Sub(t.termAt) >= r.opts.Grace && alive(r.opts.Signal, -t.run.PID) {
-		if r.signal(t, syscall.SIGKILL) {
+		if r.signal(t, syscall.SIGKILL, phaseTerminate) {
 			t.killed = true
 			r.logger(t).Info("process group did not exit after TERM; sent KILL", "pid", t.run.PID)
 		}
@@ -586,14 +672,14 @@ func (r *Runner) cleanup(t *tracked, now time.Time) {
 		return
 	}
 	if t.termAt.IsZero() {
-		if r.signal(t, syscall.SIGTERM) {
+		if r.signal(t, syscall.SIGTERM, phaseCleanup) {
 			t.termAt, t.cleaning = now, true
 			r.logger(t).Info("processes remain in the run's group after completion; sent TERM", "pid", t.run.PID)
 		}
 		return
 	}
 	if !t.killed && now.Sub(t.termAt) >= r.opts.Grace {
-		if r.signal(t, syscall.SIGKILL) {
+		if r.signal(t, syscall.SIGKILL, phaseCleanup) {
 			t.killed, t.cleaning = true, true
 			r.logger(t).Info("processes remain in the run's group after TERM; sent KILL", "pid", t.run.PID)
 		}
