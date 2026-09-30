@@ -267,12 +267,23 @@ then oldest first. Unseen items are bold. The preview shows the selected
 item: metadata, summary, root cause, the gate question with its options,
 proposed actions, assumptions and the full `report.md`. While a run executes,
 it shows the elapsed time and the latest Copilot message; for a failed run,
-the error and the last 20 lines of `stderr.log`.
+the error and the last 20 lines of `stderr.log` (lines longer than 4 KiB are
+truncated).
+
+The latest Copilot message comes from the last 256 KiB of the run's
+`output.jsonl`; the file is only reread when its size or modification time
+changes. When a long session writes more than 256 KiB without a new
+assistant message, the preview keeps showing the last message it found for
+that run (or none yet) instead of reading the whole file.
+
+A failed desktop notification is shown first in the header
+(`notification ✗ <error> (<item>)`) until a later notification succeeds; the
+run's result is not affected.
 
 | Key                | Action                                                                                |
 | ------------------ | ------------------------------------------------------------------------------------- |
 | `j` / `k`, `↓`/`↑` | Move the selection (or scroll the preview when it has focus)                           |
-| `g` / `G`          | First / last item (top / bottom of the preview when it has focus)                      |
+| `g` / `G`          | First / last item                                                                       |
 | `tab`              | Switch focus between list and preview                                                   |
 | `enter` / `o`      | Open the latest run's `report.md` in the editor                                         |
 | `c`                | Resume the latest run's session in Ghostty (`ghostty.placement`)                        |
@@ -284,7 +295,7 @@ the error and the last 20 lines of `stderr.log`.
 | `a`                | Open the item directory in the editor                                                   |
 | `d`                | Show or hide done items updated in the last 7 days                                      |
 | `r`                | Poll all sources now                                                                    |
-| `?`                | Help (close with `?` or `esc`)                                                          |
+| `?`                | Help (scroll with `j`/`k`, `↓`/`↑`, `g`/`G`; close with `?` or `esc`)                  |
 | `q` / `ctrl+c`     | Quit; executing runs continue in the background                                         |
 
 - **Confirmations.** `x` and resuming a still-executing run ask in the footer.
