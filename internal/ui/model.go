@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -651,12 +650,14 @@ func (m *Model) launchResume(id string, run int, session, placement string) tea.
 
 // editorCmd returns the editor invocation with each path as its own
 // argument. The editor runs interactively in the terminal for as long as the
-// user needs; only shutdown (the model's context ending) stops it: it gets
-// SIGTERM first and is killed if it has not exited after the stop delay. It
-// stays in tower's process group, so terminal job control is unchanged.
+// user needs; only shutdown (the model's context ending) stops it: the
+// editor and every process it started (an editor wrapper's child) get
+// SIGTERM first and are killed if they have not exited after the stop
+// delay. The invocation stays in tower's process group, so terminal job
+// control is unchanged.
 func (m *Model) editorCmd(paths ...string) *exec.Cmd {
 	cmd := exec.CommandContext(m.ctx, m.opts.Editor, paths...) //nolint:gosec // configured editor executable; paths are arguments
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	cmd.Cancel = func() error { return stopProcessTree(cmd.Process, m.opts.EditorStopDelay) }
 	cmd.WaitDelay = m.opts.EditorStopDelay
 	return cmd
 }
