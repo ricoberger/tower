@@ -1,487 +1,248 @@
 # tower
 
-tower is a personal work harness for SREs on macOS. It polls Alertmanager
-alerts, lets an unattended [GitHub Copilot CLI](https://github.com/github/copilot-cli)
-session prepare each alert with the `sre-analyze-alert` skill, and shows the
-results in a terminal UI. When you pick an item, tower resumes the prepared
-Copilot session in a new [Ghostty](https://ghostty.org) surface, so you
-continue exactly where the preparation stopped.
+A personal work board for the terminal. Work items — alerts today, pull
+requests, Jira tickets and more later — land in **TO DO**. You hand an item to
+an agent (GitHub Copilot CLI) with one key. When the agent exits, an item
+still **IN PROGRESS** moves to **WAITING** so you can resume its session.
+Items end in **DONE** when the source resolves them or when you close them.
 
-The MVP handles alerts only (Alertmanager, Grafana-managed Alertmanager and a
-JSON file source for development). Pull requests, issues and other work item
-types are planned for later.
-
-## How it works
-
-- **Foreground process.** `tower` runs one foreground process: the terminal
-  UI plus the engine (pollers, reconciler, run queue, notifications). There is
-  no daemon. Only one instance per state directory can run; a second one fails
-  and names the lock file.
-- **Detached preparations.** Each preparation run is a detached Copilot
-  process in its own process group. Quitting the UI (`q` / `ctrl+c`) stops
-  polling but leaves executing runs running. On the next start tower
-  re-attaches to them, or picks up their results if they finished in the
-  meantime. Runs interrupted before completion are retried once.
-- **Preparation versus decisions.** Automatic preparation is read-only by
-  prompt contract: the run investigates up to the skill's first confirmation
-  gate and stops there with a report. Every write, rollback, silence or other
-  decision happens later in the interactive session that you resume. tower
-  itself never executes the proposed actions of a report.
-
-Items move through these groups in the UI: **Needs you** (a finished
-preparation waits for you), **Preparing** (queued or executing), **Incoming**
-(firing, not yet prepared), **Snoozed** (silenced or inhibited),
-**Resolved** (resolved recently) and optionally **Done**.
-
-## Installation
-
-Requirements for building from source:
-
-- Go 1.27.1 or newer (see `go.mod`)
-- macOS (process and notification handling use macOS tools)
-
-```sh
-make build           # writes ./bin/tower
-cp bin/tower /usr/local/bin/tower   # or any directory on your PATH
+```
+╭─ TO DO (3) ─────────────╮╭─ IN PROGRESS (1) ───────╮╭─ WAITING (1) ───────────╮╭─ DONE (1) ──────────────╮
+│ ▌ KubePodCrashLoop… 12m ││   PostgreSQLCacheHi… 4m ││   FluxCdReconciliat… 2m ││   KubePodNotReady: … 1h │
+│ ▌ prod-de1 · Pod        ││   stage-de1 · Cache hit ││   prod-ae1 ·            ││   prod-us1 · Pod        │
+│ ▌ api/api-0 is          ││   ratio below 95%       ││   Kustomization         ││   kubenurse/kubenurse-x │
+│ ▌ restarting 5 times /… ││                         ││   kubenurse fails to …  ││   is not ready          │
+│                         ││                         ││                         ││                         │
+│   KubeHpaMaxedOut: … 9h ││                         ││                         ││                         │
+│   prod-core · HPA       ││                         ││                         ││                         │
+│   monitoring/grafana    ││                         ││                         ││                         │
+│   has been running at … ││                         ││                         ││                         │
+│                         ││                         ││                         ││                         │
+╰─────────────────────────╯╰─────────────────────────╯╰─────────────────────────╯╰─────────────────────────╯
+p progress · r resume · d done · t todo · n new · o open · K details · L log · R refresh · q quit
 ```
 
-Runtime prerequisites:
+Each column is a state. A card shows the item's title with the time since it
+entered its state (yellow in IN PROGRESS, red for failed runs in WAITING,
+green for resolved alerts manually moved back to TO DO) and up to three lines
+of its description (see "Alert sources" for alerts, the description for tasks).
 
-- An authenticated **Copilot CLI** (`copilot`) and the user-level SRE skills
-  (`sre-analyze-alert`, `sre-grafana`, `sre-kubernetes`, …) installed for
-  Copilot.
-- **Ghostty** and the external **`ghostty-new`** helper script, configured via
-  `ghostty.command`. `ghostty-new` is not part of this repository; it creates
-  a split, tab or window and types the resume command into its interactive
-  shell. tower calls it as:
+The statusline shows the keys. Failed polls and agent/task actions are written
+to `state_dir/tower.log`; keys that don't apply to the selected item (e.g. `p`
+outside TO DO) do nothing.
 
-  ```sh
-  ghostty-new --placement <split|tab|window> [--direction <direction>] \
-    --working-dir <item-dir> --title "tower: <item title>" \
-    --command "'<runs.command>' '--resume' '<session-id>' '<resume_args>'…"
-  ```
+## States
 
-- Optional: **terminal-notifier** (`brew install terminal-notifier`). With it,
-  clicking a notification resumes the item's session. Without it tower falls
-  back to `osascript`; those notifications are shown but clicking them only
-  opens Script Editor.
+| State | How items get there |
+| --- | --- |
+| TO DO | New items from a source, tasks (`n`), `t` on any item, or an alert that fires again within `reopen_window` after it resolved |
+| IN PROGRESS | Only manually: `p` on a TO DO item starts `run_command` in the background |
+| WAITING | When the agent command exits while the item is still IN PROGRESS; failed on a non-zero exit, a dead wrapper, or an abandoned start recovered at startup |
+| DONE | The source resolved the item (also while an agent is running; the agent is not stopped), or `d` |
+
+DONE items and their run logs are deleted after `retention`, checked at
+startup and hourly. An alert that fires again after it was resolved for longer
+than `reopen_window` becomes a new item. Keep `retention` at least as long as
+`reopen_window`, otherwise the old item may be deleted before it could be
+reopened.
+
+## Keys
+
+| Key | Action |
+| --- | --- |
+| `l` / `h`, `→` / `←` | Next / previous column |
+| `j` / `k`, `↓` / `↑`, `g` / `G` | Move / first / last |
+| `ctrl+d` / `ctrl+u`, `PgDn` / `PgUp` | Move half the visible cards down / up |
+| `p` | Start an agent on a TO DO item (moves it to IN PROGRESS) |
+| `r` | Resume an existing session of a TO DO, WAITING or DONE item, without changing its state |
+| `d` | Move to DONE |
+| `t` | Move back to TO DO |
+| `n` | New task in `$EDITOR` (first non-empty line is the title, the rest the description; empty cancels) |
+| `o` | Open the item's URL in the browser (alerts: the generator URL; tasks have none) |
+| `K` | Show the item's details (tasks: title and description) in a popup; `j`/`k`, `ctrl+d`/`ctrl+u` and `g`/`G` scroll, `K`/`esc`/`q` close |
+| `L` | Open the run log in `$EDITOR` |
+| `R` | Poll all sources now |
+| `q` / `ctrl+c` | Quit. Running agents keep running and move items still IN PROGRESS to WAITING when they exit |
+
+## Install
+
+Requires Go 1.27.1 or newer to build, and macOS for browser opening (`open`)
+and desktop notifications (`osascript`). The example configuration also needs
+an authenticated Copilot CLI, its SRE skills, and Ghostty with the external
+`ghostty-new` helper; that helper is not included in this repository.
+
+```sh
+go install .                  # from the repository root
+tower                         # uses ~/.config/tower/config.yaml
+tower --config path/to/config.yaml
+```
+
+Start tower from your interactive shell: agents and `resume_command` inherit
+its environment (`PATH`, `$GRAFANA_INSTANCES`, …). Only one tower runs per
+state directory. The board needs at least 80 columns and four rows; the details
+popup shrinks its margins in short terminals.
+
+### Upgrading from the previous design
+
+The kanban rewrite is incompatible with the old configuration and filesystem
+state. There is no automatic migration. Back up the old configuration and
+state, then use the example below with a **fresh state directory**. Keep the old
+artifacts until you no longer need their sessions and reports.
+
+The old `config init`, `config validate`, `resume`, `prune` and `version`
+commands, `$TOWER_CONFIG`, `--log-level` and `--headless` are gone. Select the
+configuration with `--config`; resume and refresh from the board. Alert sources
+now support Grafana-managed Alertmanagers only, not plain Alertmanagers or file
+fixtures.
+
+Agents start manually with `p`, and their prompts are configured by you. The
+old embedded read-only preparation/confirmation contract is no longer supplied.
+The example's `--yolo` option is not a sandbox; configure prompts and agent
+permissions appropriate for your environment.
 
 ## Configuration
 
-```sh
-tower config init       # writes a commented example if no config exists
-tower config validate   # prints warnings and errors, exit code 1 on errors
-```
+Unknown options are errors; there are no defaults, so set every option.
+Duration ranges, source-name uniqueness and required command placeholders are
+not fully validated at startup. Use positive retention and polling durations:
+omitted or zero retention deletes existing DONE items, and a nonpositive poll
+interval crashes tower.
 
-The configuration file is the first of `--config <file>`, `$TOWER_CONFIG` and
-`~/.config/tower/config.yaml`. A leading `~/` in the selector expands to
-`$HOME`; a relative selector is resolved against the current directory. A
-missing file is an error with a hint to `tower config init`.
-
-State (items, runs, `tower.log`, `tower.lock`) is stored in `state_dir`,
-default `~/.local/state/tower`.
-
-Rules:
-
-- **Durations** use Go syntax: `30s`, `5m`, `24h`, `8760h`.
-- **Strict decoding.** Unknown keys and wrong types are errors.
-- **Environment interpolation.** String values and list elements support
-  `$VAR`, `${VAR}` and `$$` for a literal `$`. It is a single pass, with no
-  shell and no defaults. An unset variable is an error; other `$` characters
-  (for example regex anchors) stay literal. Errors name the field and the
-  variable, never the value.
-- **Credential commands are the exception.** `token_command` and
-  `password_command` are passed verbatim to `sh -c` at request time; they are
-  never interpolated and never run by `config validate`.
-- **Paths.** `state_dir`, `sources[].path`, `*_file`, `prompts.alert` and
-  `runs.command`, `ghostty.command`, `editor` (when they contain a `/`) are
-  interpolated, then a leading `~/` expands to `$HOME`, then a relative path
-  is resolved against the **config file's directory**. Bare command names are
-  looked up on `PATH`.
-- **Executables.** `runs.command` that cannot be resolved is a warning in
-  `config validate` and an error at startup. An unresolvable
-  `ghostty.command` is a warning; the resume keys then show an error. An
-  `alertmanager` source without `grafana_instance` is a warning, because the
-  skill has no Grafana to investigate against.
-- **Editor.** `editor` is a single executable (default `$EDITOR`, then `vi`),
-  never a command line. Use a wrapper script for arguments, for example:
-
-  ```sh
-  #!/bin/sh
-  # ~/bin/code-wait
-  exec code --wait "$@"
-  ```
-
-  and `editor: ~/bin/code-wait`.
-
-### Example
-
-All hosts and credentials below are synthetic.
+`state_dir` must be nonempty. `$VAR` and `${VAR}` are expanded, then `~` or a
+leading `~/` expands to the home directory. Relative paths are resolved against
+the directory tower was started in, **not** the configuration file's directory.
+The resulting absolute path is shared with detached wrappers. Characters such
+as `?`, `#` and `%` are treated as ordinary filename characters.
 
 ```yaml
-# ~/.config/tower/config.yaml
+# SQLite database, lock file, tower.log and runs/<item>.log. $VAR and ~/ expand.
+state_dir: $HOME/.local/state/tower
 
-# Where items, logs and the lock file are stored.
-state_dir: ~/.local/state/tower
+app:
+  # DONE items are deleted after this duration.
+  retention: 48h
 
-# Editor used to open reports and logs. Defaults to $EDITOR, then "vi".
-# A single executable name or path (no arguments, no shell expression); use a
-# wrapper script for options such as --wait.
-editor: nvim
+agent:
+  # Started when an item moves to IN PROGRESS.
+  run_command: copilot --yolo --remote --session-id={{.SessionID}} -p {{.Prompt}}
+  # Run when a TO DO, WAITING or DONE item with a session is resumed.
+  resume_command: ghostty-new --placement=tab --title={{.Title}} --command 'copilot --yolo --remote --resume={{.SessionID}}'
 
-sources:
-  - name: prod-eu                        # unique, [a-z0-9-]+, used in item ids
-    type: alertmanager                   # alertmanager | file
-    # Name of the Grafana instance in $GRAFANA_INSTANCES (the same variable
-    # the sre-grafana skill uses). It is the Grafana the skill investigates
-    # against. For Grafana-managed sources it also provides url + auth for
-    # polling, so both can be omitted.
-    grafana_instance: prod-eu
-    # Grafana-managed Alertmanager: alerts are read from
-    # {url}/api/alertmanager/{grafana_alertmanager}/api/v2/alerts
-    # Omit for a plain Prometheus Alertmanager ({url}/api/v2/alerts).
-    grafana_alertmanager: grafana
-    # Alertmanager matchers pushed down to the API as repeated filter= params.
-    filter:
-      - team="core"
-      - severity=~"critical|warning"
-    # Optional receiver regex pushed down as receiver= param.
-    receiver: ".*pager.*"
+providers:
+  alerts:
+    poll_interval: 1m
+    # A resolved alert that fires again within this window reopens its item.
+    reopen_window: 24h
+    sources:
+      - name: dev-de1                  # must be nonempty and unique
+        grafana_instance: dev-de1      # key in $GRAFANA_INSTANCES
+        grafana_alertmanager: grafana
+        filter:
+          - team="product-core-infra"
+        receiver: "incidentio"         # "" for all receivers
+    # Go template, see "Prompts".
+    prompt: |
+      Investigate the alert {{.Title}} using the `sre-analyze-alert` skill ...
+      {{.Details}}
 
-  - name: prod-us
-    type: alertmanager
-    grafana_instance: prod-us
-    grafana_alertmanager: grafana
-    # Explicit url and auth override the values derived from the instance
-    # independently; "auth: {type: none}" disables the derived auth.
-    url: https://alerts-proxy.example.com
-    auth:
-      type: bearer
-      token_command: security find-generic-password -s tower-prod-us -w
+  tasks:
+    prompt: |
+      Task: {{.Title}}
 
-  - name: legacy-am
-    type: alertmanager                   # plain Prometheus Alertmanager
-    url: https://alertmanager.example.com
-    # Polling credentials (never derived for plain sources).
-    auth:
-      type: basic                        # none | basic | bearer
-      # exactly one of token / token_file / token_command for bearer;
-      # username + one of password / password_file / password_command for basic
-      username: tower
-      password_file: ~/.config/tower/legacy-am.password
-    # Optional but recommended for plain sources: without it the skill has no
-    # Grafana to query metrics / logs / traces. Investigation metadata only.
-    grafana_instance: prod-eu
-    filter:
-      - team="core"
-
-  - name: dev-fixture
-    type: file                           # reads alerts from a JSON file (dev / tests)
-    path: ./testdata/alerts.json         # same schema as GET /api/v2/alerts; relative to this file's directory
-
-alerts:
-  # Poll interval for all alert sources (at least 10s).
-  poll_interval: 1m
-  # An alert must be firing for at least this long (measured from startsAt)
-  # before it is prepared automatically.
-  prepare_after: 5m
-  # Resolved items stay visible (dimmed) this long before becoming done.
-  resolved_linger: 4h
-  # A re-fire of the same fingerprint within this window reopens the item.
-  reopen_window: 24h
-  # Queue priority by severity label value; unknown/missing values go last.
-  severity_order: [critical, error, warning, info]
-
-runs:
-  # Maximum number of concurrently executing runs (1-10).
-  concurrency: 2
-  # Runs are killed after this duration and marked failed (at least 1m).
-  timeout: 20m
-  # Command and extra arguments for prep runs. tower always adds:
-  #   -p <prompt> --session-id <uuid> --output-format json --no-ask-user
-  command: copilot
-  args: [--yolo]
-  # Optional; omitted = Copilot CLI default model.
-  model: ""
-  # Arguments used when resuming a session interactively. tower always adds:
-  #   --resume <session-id>
-  resume_args: []
-
-notifications:
-  enabled: true
-  # terminal-notifier is used when found on PATH (clickable), otherwise osascript.
-  sound: default                         # "" disables sound
-
-ghostty:
-  # Script used to open new Ghostty surfaces (external helper).
-  command: ghostty-new
-  # Placement for the "resume" key; the "resume in tab" key always uses "tab".
-  placement: split                       # split | tab | window
-  direction: right                       # used for split placement
-
-retention:
-  # Done items older than this are deleted on startup and by `tower prune`.
-  done_after: 8760h                      # 1 year
-
-prompts:
-  # Optional override of the embedded prep prompt template.
-  alert: ""                              # path to a Go text/template file
+      {{.Description}}
 ```
 
-### `$GRAFANA_INSTANCES`
+### Commands
 
-tower reuses the environment variable of the `sre-grafana`,
-`sre-analyze-alert` and `sre-kubernetes-rightsizing` skills, so Grafana URLs
-and credentials live in one place:
+`run_command` and `resume_command` are split into arguments like a shell
+would (whitespace, `'…'`, `"…"` and `\` escapes) and are run **without a
+shell**. Unquoted `; | & ( )` and backticks are rejected, and environment
+variables are not expanded. Wrap anything more complex in a script or
+`sh -c '…'`.
 
-```json
-{
-  "prod-eu": {
-    "url": "https://grafana-eu.example.com",
-    "auth": { "tokenCommand": "security find-generic-password -s grafana-prod-eu -w" }
-  },
-  "prod-us": {
-    "url": "https://grafana-us.example.com",
-    "auth": { "tokenCommand": "cat ~/.cache/grafana/prod-us.token" }
-  }
-}
-```
+Each argument is a [Go template](https://pkg.go.dev/text/template). Template
+actions (`{{ … }}`) may contain spaces, quotes and literal `}}` inside quoted
+strings or comments; they are kept together while splitting, except inside
+single quotes. A rendered value always stays one argument, whatever it contains:
 
-- The variable is required only when a source references `grafana_instance`.
-  Only referenced records are validated: each needs a string `url`, and
-  `auth.tokenCommand` is needed when a Grafana-managed source derives its
-  polling auth from it.
-- For polling, tower runs `auth.tokenCommand` with `sh -c` at request time and
-  sends the output as a bearer token.
-- For investigations, tower passes only the **instance name**. `alert.md`
-  contains a "Grafana Credentials" line telling the skill to resolve the
-  instance from `$GRAFANA_INSTANCES` itself. Preparation runs inherit tower's
-  environment; tower never writes tokens into prompts or artifacts.
+| Field | Value | Available in |
+| --- | --- | --- |
+| `{{.Prompt}}` | The rendered prompt | `run_command` (required) |
+| `{{.SessionID}}` | A new UUID per run | both (required) |
+| `{{.ID}}` | The item's number | both |
+| `{{.Title}}` | The item's title | both |
 
-## Using the terminal UI
+`ghostty-new --command '…'` types its argument into a shell. Wrap item data
+in `shquote` there, which quotes a value as one shell word, e.g.
+`--command 'copilot --resume={{.SessionID}} --name={{shquote .Title}}'`.
 
-Run `tower`. The header shows each source's health (last successful poll,
-last error or "never polled") and the runner (`running X/Y · queued N`). The
-list is grouped by state; within a group, items are sorted by severity order,
-then oldest first. Unseen items are bold. The preview frame is titled with
-the selected item and shows its metadata, then:
+`run_command` runs detached in the directory tower was started in, with stdin
+from `/dev/null` and its output in `state_dir/runs/<item>.log`. There is no
+timeout and no concurrency limit. The wrapper records its PID before starting
+the command. At startup, tower marks abandoned starts with no claimed wrapper
+as failed in WAITING; a late wrapper cannot launch one of those recovered
+sessions. While running, tower recovers dead wrappers only when the observed
+state, session and PID still match.
 
-- for a ready or blocked run, the rendered `report.md` followed by the
-  `result.json` summary, root cause, gate question with its options, proposed
-  actions and assumptions;
-- for an item without a run, the rendered `alert.md` (reread when it
-  changes; a missing or unreadable file is shown as a hint);
-- while a run executes, the elapsed time and the latest Copilot message;
-- for a failed run, the error and the last 20 lines of `stderr.log` in full
-  (if those lines together exceed 16 MiB, the preview says so instead; open
-  the log with `l`).
+When the command exits, its failure status and state transition are recorded
+atomically. If the item is still IN PROGRESS in that session, it moves to
+WAITING and shows a macOS notification (osascript). Otherwise its current state
+and time in state are preserved. Exact exit codes are in the run log; the
+store keeps only whether the run failed.
 
-Markdown is rendered with [glamour](https://github.com/charmbracelet/glamour)
-and wrapped to the preview width. Rendering happens in the background, so the
-TUI stays responsive: until it finishes (and after a resize) the document is
-shown as plain text. Report and alert content is sanitized: only text, colors
-and complete hyperlinks reach the terminal, never other escape sequences.
-Documents over 1 MiB are shown as plain text; files over 16 MiB are not read.
+`r` reuses the stored session, including after `t` moved an item back to TO DO;
+it neither starts a new run nor changes the column. By contrast, `p` starts a
+new session. Moving an item does not stop its running agent, so a TO DO or DONE
+item's session may still be active when you resume it.
 
-The theme follows `GLAMOUR_STYLE` in the environment `tower` is started from,
-like other glamour-based tools: a standard style name (`dark`, the default,
-`light`, `dracula`, `tokyo-night`, `pink`, `ascii`, `notty`) or the path of a
-JSON style file such as a
-[Catppuccin Glamour theme](https://github.com/catppuccin/glamour) (at most
-1 MiB). The document margin of the style is ignored so the preview uses its
-full width. The style is loaded in the background after the UI starts;
-previews show plain text until then. Only regular files are read as style
-files, and a style with code block colors that cannot be parsed is rejected.
-When the style cannot be used, the default style is used and the footer says
-why. A style cannot bypass the sanitization above.
+`resume_command` is a launcher, not an interactive command in tower's terminal:
+its stdin is `/dev/null`, and its output is captured for error diagnostics. It
+has a 30-second timeout. After it exits or is cancelled, output pipes held by
+descendants are closed after at most 250 ms; tower does not signal those
+descendants.
 
-The latest Copilot message comes from the last 256 KiB of the run's
-`output.jsonl`; the file is only reread when its size or modification time
-changes. When a long session writes more than 256 KiB without a new
-assistant message, the preview keeps showing the last message it found for
-that run (or none yet) instead of reading the whole file.
+### Alert sources
 
-A failed desktop notification is shown first in the header
-(`notification ✗ <error> (<item>)`) until a later notification succeeds; the
-run's result is not affected.
+Sources are Grafana-managed Alertmanagers. The URL and the token command come
+from `$GRAFANA_INSTANCES`, a JSON object keyed by instance name with `url` and
+`auth.tokenCommand` (shared with the SRE skills). The token command runs with
+`sh -c` on every poll. Silenced and inhibited alerts are shown like firing
+ones. A failed poll changes nothing; the error is written to `tower.log`.
+Currently `$GRAFANA_INSTANCES` must contain valid JSON even with no alert
+sources; use `{}` in that case and still configure a positive poll interval.
 
-| Key                | Action                                                                                |
-| ------------------ | ------------------------------------------------------------------------------------- |
-| `j` / `k`, `↓`/`↑` | Move the selection (or scroll the preview when it has focus)                           |
-| `ctrl+d` / `ctrl+u` | Move the selection half a page down / up (or scroll the preview half a page when it has focus) |
-| `g` / `G`          | First / last item                                                                       |
-| `ctrl+f` / `ctrl+b` | Scroll the preview half a page down / up                                               |
-| `home` / `end`     | Scroll the preview to the top / bottom                                                  |
-| `tab`              | Switch focus between list and preview                                                   |
-| `enter` / `o`      | Open the latest run's `report.md` in the editor                                         |
-| `c`                | Resume the latest run's session in Ghostty (`ghostty.placement`)                        |
-| `C`                | Resume in a new tab                                                                     |
-| `p`                | Prepare now / re-run                                                                    |
-| `x`                | Dismiss (confirm with `y`)                                                              |
-| `l`                | Open the latest run's `output.jsonl` and `stderr.log` in the editor                     |
-| `b`                | Open the alert's runbook URL, else its generator URL, in the browser (http/https only)  |
-| `a`                | Open the item directory in the editor                                                   |
-| `d`                | Show or hide done items updated in the last 7 days                                      |
-| `r`                | Poll all sources now                                                                    |
-| `?`                | Help (scroll with `j`/`k`, `↓`/`↑`, `ctrl+d`/`ctrl+u`, `ctrl+f`/`ctrl+b`, `g`/`G`, `home`/`end`; close with `?` or `esc`) |
-| `q` / `ctrl+c`     | Quit; executing runs continue in the background                                         |
+Alert titles are `alertname · severity · source`, with whitespace collapsed to
+a single line. The description is the `summary` and `description` annotations,
+and the URL is the generator URL. The details are the alert as Markdown:
+Grafana instance, URL and Alertmanager datasource of the source, severity,
+state, start time, receivers, generator URL, summary, description, labels and
+the other annotations.
 
-- **Confirmations.** `x` and resuming a still-executing run ask in the footer.
-  Only `y` confirms; `n` or `esc` cancel. While a confirmation or the help is
-  open, other action keys do nothing. A resume confirmation is bound to the
-  run it was asked for; if a newer run appears meanwhile, the resume is
-  cancelled.
-- **Seen and history.** Only a successful report open (`enter`/`o`) and a
-  successful resume mark an item seen and record `opened-report` or
-  `resumed-session`. `p` and `x` are validated by the engine, which records
-  `manual-run` and `dismissed`; rejections become footer hints. `l`, `a` and
-  `b` record nothing. Failed actions never record history.
-- **Footer hints.** Results and errors of actions are shown in the footer
-  for 5 seconds, then the footer returns to the key hints. Confirmations stay
-  until they are answered.
-- **Engine requests never block the UI.** A slow poll or a busy engine only
-  delays the footer result; navigation keeps working.
+### Prompts
 
-### Resume outside the UI
+Prompts are Go templates (`text/template`); unknown fields are errors. Every
+provider's prompt (`providers.<kind>.prompt`) gets the same fields:
 
-```sh
-tower resume <item-id> [--placement split|tab|window]
-```
+| Field | Value |
+| --- | --- |
+| `{{.ID}}` | The item's number |
+| `{{.Kind}}` | The item kind (`alert`, `task`) |
+| `{{.Source}}` | The source, e.g. the alert source name |
+| `{{.Title}}` | The one-line title |
+| `{{.Description}}` | The short description shown on the board |
+| `{{.Details}}` | The item as Markdown (empty for tasks) |
+| `{{.URL}}` | The item's link (empty for tasks) |
 
-`tower resume` opens the item's latest session in Ghostty whether or not the
-UI is running. It does not start the engine or take the instance lock. It marks
-the item seen and records `resumed-session`. It refuses a run that is still
-executing (use the UI, which asks for confirmation). A run without a started
-session, such as one that failed before Copilot started, cannot be resumed.
-
-**Notification clicks.** A terminal-notifier notification runs
-`'<tower>' --config '<config>' resume <item-id>` with launchd's minimal
-environment and no terminal. So before loading the configuration,
-`tower resume` captures your **interactive login shell** environment
-(`<shell> -l -i -c`), because `zsh -lc` does not read `~/.zshrc`, where PATH
-additions and `$GRAFANA_INSTANCES` usually live. The shell is `$SHELL`, else
-the login shell from the password database, else `/bin/zsh`. Startup output of
-the shell is ignored and the capture has a 10 s limit. The captured
-environment is never logged or written to disk. Captured values fill in
-missing variables, while values tower was started with win. `PATH` is always
-the login shell's, and executables are resolved on it (absolute paths still
-work). Ghostty receives the merged environment.
-
-Resume failures are printed and also shown as an error notification without a
-click action, because a notification click has no terminal. The typed resume
-command single-quotes every word. Commands, session IDs and resume arguments
-that contain control characters (newline, CR, NUL, …) are rejected before
-anything is launched.
-
-### Other commands
-
-```sh
-tower prune [--older-than <dur>] [--dry-run]   # delete old done items
-tower version
-```
-
-Global flags: `--config <file>`, `--log-level debug|info|warn|error`. In the
-UI, logs go only to `<state_dir>/tower.log`.
-
-## Preparation contract
-
-Each preparation run executes Copilot with the embedded prompt, which asks it
-to use the **unchanged** `sre-analyze-alert` skill:
-
-- The run is **read-only by prompt contract**: no mutations anywhere (no
-  kubectl/helm/flux changes, silences, pushes, GitHub/Jira/Grafana writes).
-  This is an instruction, not a technical sandbox; runs use `--yolo` so they
-  never stall on tool permissions, and `--no-ask-user` so they never stall on
-  questions.
-- The run stops at the skill's **first** confirmation gate or missing-input
-  question and never answers it itself. The skill's request to restate the
-  alert is the exception: the restatement goes into the report.
-- Missing inputs are never guessed. The run then ends `blocked` with the exact
-  question.
-- The run always writes `report.md` and `result.json` into its run directory,
-  `result.json` last. The status is `ready` or `blocked`. A missing or invalid
-  file makes the run `failed`.
-- Earlier reports of the same alert (up to three, most recent first) are
-  referenced in the prompt, and the run states what changed.
-- `prompts.alert` overrides the template (Go `text/template`) with the same
-  data: `RunDir`, `AlertFile`, `AlertMarkdown`, `SourceName`, `Fingerprint`,
-  `PreviousReports`, `ResultSchema`.
-- When you resume, you continue at the gate with the skill's normal
-  interactive flow. Proposed actions in the report are suggestions; tower
-  never executes them.
+Providers store these fields with the item. Current polled items (alerts)
+update them on every poll while they are reported, including items manually
+closed while still firing. Field-only updates preserve the state, session,
+time in state and retention timestamp; historical episodes replaced by a new
+item remain unchanged.
 
 ## Development
 
 ```sh
-make build   # build ./bin/tower
-make test    # go test -race ./...
-make lint    # go vet and golangci-lint
+go build -o ./bin/tower .
+go test -race ./...
+go vet ./... && golangci-lint run ./...
 ```
-
-Tests never use real credentials, Grafana, Copilot, Ghostty, your login shell,
-a browser or desktop notifications.
-
-For manual experiments, use an isolated configuration with a file source, a
-separate state directory and the fake Copilot fixture:
-
-```yaml
-# /tmp/tower-dev/config.yaml
-state_dir: ./state
-sources:
-  - name: dev
-    type: file
-    path: ./alerts.json          # GET /api/v2/alerts format
-alerts:
-  prepare_after: 0s
-runs:
-  command: /path/to/tower/testdata/fake-copilot.sh
-notifications:
-  enabled: false
-ghostty:
-  command: /usr/bin/true
-```
-
-```sh
-FAKE_COPILOT_MODE=ready tower --config /tmp/tower-dev/config.yaml
-```
-
-The fixture never contacts any service. It is controlled by environment
-variables:
-
-- `FAKE_COPILOT_MODE`: `ready` (default), `blocked`, `invalid`,
-  `missing-result`, `missing-report`, `nonzero`, `hang` or `descendant`
-- `FAKE_COPILOT_DELAY`: seconds before finishing
-- `FAKE_COPILOT_DESCENDANT=1`: leave a background process in the group
-- `FAKE_COPILOT_EARLY=1`: write the result files before the delay
-- `FAKE_COPILOT_DIR`: a control directory for per-item modes, holding and a
-  start/end log
-
-For development without the UI, `tower --headless --config …` runs the same
-engine and logs to stderr and `tower.log`. The flag is intentionally not
-listed in `tower --help`.
-
-## Manual live check (post-merge, not yet performed)
-
-The automated tests use fakes only. This check verifies the preparation
-contract against a real Grafana-managed source and the real skills. It has
-**not** been performed yet.
-
-1. Configure a Grafana-managed source with `grafana_instance` and
-   `grafana_alertmanager`. Narrow its `filter` so that only one real, harmless
-   alert matches. Make sure `$GRAFANA_INSTANCES` contains the instance and that
-   the Copilot CLI and SRE skills are installed and authenticated.
-2. Run `tower` in the foreground and wait until the alert's preparation run
-   finishes.
-3. The run must reach its gate with `ready`. Open the item directory (`a`)
-   and inspect:
-   - `alert.md`: the "Grafana Credentials" line names the instance and tells
-     the skill to resolve it from `$GRAFANA_INSTANCES`.
-   - `runs/<n>/report.md`: a report in the skill's format.
-   - `runs/<n>/result.json`: valid, `"status": "ready"`.
-4. Check the session (`l` or resume with `c`): the skill understood the
-   instance-name line and never asked for credentials.
-
-A `blocked` or `failed` run does not pass this check. If the skill does not
-understand the instance-name line, adjust the wording of that line in
-`alert.md`, not the skill. Never put a token into `alert.md`, the prompt or
-any other artifact.

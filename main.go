@@ -1,394 +1,132 @@
-// Command tower is a personal work control center that turns alerts into
-// persistent work items.
+// Command tower is a personal work board: alerts and tasks flow into TO DO,
+// agents work on them in IN PROGRESS, finished sessions wait for the user in
+// WAITING and resolved work ends in DONE.
 package main
 
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
-	"io"
+	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/alecthomas/kong"
 
+	"github.com/ricoberger/tower/internal/agent"
+	"github.com/ricoberger/tower/internal/app"
 	"github.com/ricoberger/tower/internal/config"
-	"github.com/ricoberger/tower/internal/item"
-	"github.com/ricoberger/tower/internal/loginenv"
 	"github.com/ricoberger/tower/internal/notify"
-	"github.com/ricoberger/tower/internal/runner"
+	"github.com/ricoberger/tower/internal/provider"
+	"github.com/ricoberger/tower/internal/provider/alerts"
+	"github.com/ricoberger/tower/internal/provider/tasks"
+	"github.com/ricoberger/tower/internal/store"
+	"github.com/ricoberger/tower/internal/ui"
 )
 
-// Set via -ldflags by `make build`.
-var (
-	version = "dev"
-	commit  = "unknown"
-	date    = "unknown"
-)
-
-// env abstracts the process environment for tests. Nil fields select the
-// production behavior.
-type env struct {
-	lookup   config.LookupEnv
-	getwd    func() (string, error)
-	now      func() time.Time
-	lookPath config.LookPath
-	// environ returns the caller's environment (os.Environ).
-	environ func() []string
-	// tui runs the terminal UI until it quits or ctx is cancelled.
-	tui func(ctx context.Context, m tea.Model) error
-	// openURL opens a URL in the browser.
-	openURL func(ctx context.Context, url string) error
-	// captureEnv captures the interactive login-shell environment.
-	captureEnv func(ctx context.Context) (loginenv.Env, error)
-	// resumeError shows a resume failure as a desktop notification.
-	resumeError func(ctx context.Context, lookPath config.LookPath, msg string)
-	// processOwns verifies that a recorded PID still runs a session.
-	processOwns func(pid int, sessionID string) bool
-	// deliver overrides the engine's notification delivery (nil: desktop
-	// notifications).
-	deliver func(ctx context.Context, n notify.Notification) error
-	// engineOptions adjusts the engine options of the terminal UI mode
-	// (tests: tickers, hooks and runner timing).
-	engineOptions func(*engineOptions)
-}
-
-// withDefaults fills unset fields with the production behavior.
-func (e env) withDefaults() env {
-	if e.lookup == nil {
-		e.lookup = os.LookupEnv
-	}
-	if e.getwd == nil {
-		e.getwd = os.Getwd
-	}
-	if e.now == nil {
-		e.now = time.Now
-	}
-	if e.lookPath == nil {
-		e.lookPath = exec.LookPath
-	}
-	if e.environ == nil {
-		e.environ = os.Environ
-	}
-	if e.tui == nil {
-		e.tui = runProgram
-	}
-	if e.openURL == nil {
-		e.openURL = openBrowser
-	}
-	if e.captureEnv == nil {
-		e.captureEnv = captureLoginEnv(e)
-	}
-	if e.resumeError == nil {
-		e.resumeError = deliverResumeError
-	}
-	if e.processOwns == nil {
-		e.processOwns = runner.ProcessOwns
-	}
-	return e
+type CLI struct {
+	TUI  TUICmd  `cmd:"" default:"withargs"`
+	Exec ExecCmd `cmd:"" hidden:""`
 }
 
 func main() {
-	os.Exit(runMain(env{}))
+	ctx := kong.Parse(&CLI{})
+	ctx.FatalIfErrorf(ctx.Run())
 }
 
-// runMain runs tower with the process arguments until a signal arrives.
-func runMain(e env) int {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return run(ctx, os.Args[1:], os.Stdout, os.Stderr, e)
+type TUICmd struct {
+	Config string `default:"~/.config/tower/config.yaml" type:"path" help:"Configuration file."`
 }
 
-type globalFlags struct {
-	config   string
-	logLevel string
-	headless bool
-}
-
-func (g *globalFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&g.config, "config", g.config, "path to the config file (default $TOWER_CONFIG, then $HOME/.config/tower/config.yaml)")
-	fs.StringVar(&g.logLevel, "log-level", g.logLevel, "log level: debug, info, warn, error")
-}
-
-const usage = `Usage: tower [--config <file>] [--log-level debug|info|warn|error] [command]
-
-Commands:
-  (none)                                     start the terminal UI and the engine
-  resume <item-id> [--placement split|tab|window]
-                                             resume the item's latest Copilot session in Ghostty
-  config init                                write a commented example config if none exists
-  config validate                            validate the config and print warnings/errors
-  prune [--older-than <dur>] [--dry-run]     delete done items older than the duration
-  version                                    print version, commit and build date
-`
-
-func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.Usage = func() { _, _ = fmt.Fprint(stderr, usage) }
-	return fs
-}
-
-func run(ctx context.Context, args []string, stdout, stderr io.Writer, e env) int {
-	e = e.withDefaults()
-	g := &globalFlags{logLevel: "info"}
-	fs := newFlagSet("tower", stderr)
-	g.register(fs)
-	// Hidden: runs the engine without the terminal UI.
-	fs.BoolVar(&g.headless, "headless", false, "")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 1
-	}
-	rest := fs.Args()
-
-	if len(rest) > 0 && rest[0] == "version" {
-		if len(rest) > 1 {
-			_, _ = fmt.Fprintln(stderr, "error: version takes no arguments")
-			return 1
-		}
-		_, _ = fmt.Fprintf(stdout, "tower %s (commit %s, built %s)\n", version, commit, date)
-		return 0
-	}
-
-	var cmd func() int
-	switch {
-	case len(rest) == 0:
-		cmd = func() int { return cmdEngine(ctx, g, stderr, e) }
-	case rest[0] == "resume":
-		// Resume reports its own errors, including invalid arguments, as a
-		// notification: it is usually started without a terminal.
-		return cmdResume(ctx, g, rest[1:], stdout, stderr, e)
-	case rest[0] == "config":
-		if len(rest) < 2 {
-			_, _ = fmt.Fprintln(stderr, "error: expected \"config init\" or \"config validate\"")
-			return 1
-		}
-		sub := newFlagSet("tower config "+rest[1], stderr)
-		g.register(sub)
-		if err := sub.Parse(rest[2:]); err != nil {
-			return flagExit(err)
-		}
-		if sub.NArg() > 0 {
-			_, _ = fmt.Fprintln(stderr, "error: unexpected arguments")
-			return 1
-		}
-		switch rest[1] {
-		case "init":
-			cmd = func() int { return cmdConfigInit(g, stdout, stderr, e) }
-		case "validate":
-			cmd = func() int { return cmdConfigValidate(g, stdout, stderr, e) }
-		default:
-			_, _ = fmt.Fprintf(stderr, "error: unknown config command %q\n", rest[1])
-			return 1
-		}
-	case rest[0] == "prune":
-		sub := newFlagSet("tower prune", stderr)
-		g.register(sub)
-		olderThan := sub.String("older-than", "", "delete done items whose updated_at is older than this duration (default retention.done_after)")
-		dryRun := sub.Bool("dry-run", false, "only print what would be deleted")
-		if err := sub.Parse(rest[1:]); err != nil {
-			return flagExit(err)
-		}
-		if sub.NArg() > 0 {
-			_, _ = fmt.Fprintln(stderr, "error: unexpected arguments")
-			return 1
-		}
-		cmd = func() int { return cmdPrune(g, *olderThan, *dryRun, stdout, stderr, e) }
-	default:
-		_, _ = fmt.Fprintf(stderr, "error: unknown command %q\n", rest[0])
-		_, _ = fmt.Fprint(stderr, usage)
-		return 1
-	}
-
-	if _, err := parseLogLevel(g.logLevel); err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	return cmd()
-}
-
-func flagExit(err error) int {
-	if errors.Is(err, flag.ErrHelp) {
-		return 0
-	}
-	return 1
-}
-
-func configPath(g *globalFlags, e env) (string, error) {
-	cwd, err := e.getwd()
+func (c *TUICmd) Run() error {
+	cfg, err := config.Load(c.Config)
 	if err != nil {
-		return "", fmt.Errorf("determine working directory: %w", err)
+		return fmt.Errorf("load config: %w", err)
 	}
-	return config.ResolvePath(g.config, e.lookup, cwd)
-}
 
-// loadConfig loads the config and prints its findings. It returns nil if the
-// config cannot be used.
-func loadConfig(g *globalFlags, stderr io.Writer, e env) *config.Config {
-	path, err := configPath(g, e)
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
-		return nil
+	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
+		return fmt.Errorf("mkdir %s: %w", cfg.StateDir, err)
 	}
-	cfg, report, err := config.Load(path, e.lookup)
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
-		return nil
-	}
-	for _, w := range report.Warnings {
-		_, _ = fmt.Fprintln(stderr, "warning:", w)
-	}
-	for _, msg := range report.Errors {
-		_, _ = fmt.Fprintln(stderr, "error:", msg)
-	}
-	if !report.OK() {
-		_, _ = fmt.Fprintf(stderr, "error: invalid configuration %s\n", path)
-		return nil
-	}
-	return cfg
-}
 
-func cmdEngine(ctx context.Context, g *globalFlags, stderr io.Writer, e env) int {
-	level, _ := parseLogLevel(g.logLevel)
-	cfg := loadConfig(g, stderr, e)
-	if cfg == nil {
-		return 1
+	lock, err := store.Lock(filepath.Join(cfg.StateDir, "tower.lock"))
+	if err != nil {
+		return fmt.Errorf("store lock %s: %w", filepath.Join(cfg.StateDir, "tower.lock"), err)
 	}
-	if !g.headless {
-		return runTUI(ctx, cfg, level, stderr, e)
-	}
-	if err := runEngine(ctx, engineOptions{
-		cfg:      cfg,
-		level:    level,
-		stderr:   stderr,
-		now:      e.now,
-		lookPath: e.lookPath,
-		deliver:  e.deliver,
-	}); err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	return 0
-}
+	defer func() { _ = lock.Close() }()
 
-func cmdConfigInit(g *globalFlags, stdout, stderr io.Writer, e env) int {
-	path, err := configPath(g, e)
+	logf, err := os.OpenFile(filepath.Join(cfg.StateDir, "tower.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
-		return 1
+		return fmt.Errorf("open log file %s: %w", filepath.Join(cfg.StateDir, "tower.log"), err)
 	}
-	if err := config.WriteExample(path); err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	_, _ = fmt.Fprintf(stdout, "wrote example configuration to %s\n", path)
-	return 0
-}
+	defer func() { _ = logf.Close() }()
+	log := slog.New(slog.NewTextHandler(logf, nil))
 
-func cmdConfigValidate(g *globalFlags, stdout, stderr io.Writer, e env) int {
-	path, err := configPath(g, e)
+	store, err := store.New(cfg.StateDir)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	cfg, report, err := config.Load(path, e.lookup)
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
-		return 1
-	}
-	warnings := report.Warnings
-	if report.OK() {
-		f := config.CheckExecutables(cfg, e.lookPath)
-		for _, w := range []string{f.RunsCommand, f.GhosttyCommand} {
-			if w != "" {
-				warnings = append(warnings, w)
-			}
-		}
-	}
-	for _, w := range warnings {
-		_, _ = fmt.Fprintln(stdout, "warning:", w)
-	}
-	for _, msg := range report.Errors {
-		_, _ = fmt.Fprintln(stdout, "error:", msg)
-	}
-	if !report.OK() {
-		_, _ = fmt.Fprintf(stdout, "%s: %d error(s), %d warning(s)\n", path, len(report.Errors), len(warnings))
-		return 1
-	}
-	_, _ = fmt.Fprintf(stdout, "%s: valid (%d warning(s))\n", path, len(warnings))
-	return 0
-}
-
-func cmdPrune(g *globalFlags, olderThan string, dryRun bool, stdout, stderr io.Writer, e env) int {
-	cfg := loadConfig(g, stderr, e)
-	if cfg == nil {
-		return 1
-	}
-	d := cfg.Retention.DoneAfter
-	if olderThan != "" {
-		v, err := time.ParseDuration(olderThan)
-		if err != nil || v <= 0 {
-			_, _ = fmt.Fprintln(stderr, "error: --older-than must be a positive Go duration (e.g. 720h)")
-			return 1
-		}
-		d = v
-	}
-	store, err := item.Open(cfg.StateDir)
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
-		return 1
+		return fmt.Errorf("store: %w", err)
 	}
 	defer func() { _ = store.Close() }()
-	cutoff := e.now().UTC().Add(-d)
 
-	if dryRun {
-		cands, err := store.PruneCandidates(cutoff)
-		if err != nil {
-			_, _ = fmt.Fprintln(stderr, "error:", err)
-			return 1
-		}
-		for _, c := range cands {
-			_, _ = fmt.Fprintf(stdout, "would delete %s (updated_at %s)\n", c.ID, c.UpdatedAt.Format(time.RFC3339))
-		}
-		_, _ = fmt.Fprintf(stdout, "%d done item(s) older than %s would be deleted\n", len(cands), d)
-		return 0
-	}
-
-	lock, err := store.TryLockInstance()
+	exe, err := os.Executable()
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "error: refusing to prune:", err)
-		return 1
+		return fmt.Errorf("executable: %w", err)
 	}
-	defer func() { _ = lock.Release() }()
 
-	cands, err := store.PruneCandidates(cutoff)
+	alertsProvider, err := alerts.New(cfg.Providers.Alerts)
 	if err != nil {
-		_, _ = fmt.Fprintln(stderr, "error:", err)
-		return 1
+		return fmt.Errorf("alerts provider: %w", err)
 	}
-	deleted, failed := 0, false
-	for _, c := range cands {
-		ok, err := store.PruneItem(c.ID, cutoff)
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: prune %s: %v\n", c.ID, err)
-			failed = true
-			continue
-		}
-		if ok {
-			deleted++
-			_, _ = fmt.Fprintf(stdout, "deleted %s (updated_at %s)\n", c.ID, c.UpdatedAt.Format(time.RFC3339))
-		}
+	tasksProvider, err := tasks.New(cfg.Providers.Tasks)
+	if err != nil {
+		return fmt.Errorf("tasks provider: %w", err)
 	}
-	_, _ = fmt.Fprintf(stdout, "%d done item(s) older than %s deleted\n", deleted, d)
-	if failed {
-		return 1
+	providers := provider.Set{alertsProvider, tasksProvider}
+
+	agent, err := agent.New(cfg.Agent, cfg.StateDir, exe, store, providers)
+	if err != nil {
+		return fmt.Errorf("agent: %w", err)
 	}
-	return 0
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGHUP)
+	defer cancel()
+
+	if err := store.RecoverStarts(ctx, time.Now()); err != nil {
+		return fmt.Errorf("recover starts: %w", err)
+	}
+
+	app := app.New(cfg.App, store, agent, providers, tasksProvider, log)
+	go app.Run(ctx)
+
+	p := tea.NewProgram(ui.New(ctx, app, log), tea.WithContext(ctx))
+	_, err = p.Run()
+	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
+		err = nil
+	}
+	return err
+}
+
+type ExecCmd struct {
+	StateDir string   `required:"" type:"path" help:"State directory."`
+	Item     int64    `required:"" help:"Item id."`
+	Session  string   `required:"" help:"Session id."`
+	Title    string   `help:"Item title."`
+	Command  []string `arg:"" help:"Command and arguments."`
+}
+
+func (c *ExecCmd) Run() error {
+	store, err := store.New(c.StateDir)
+	if err != nil {
+		return err
+	}
+
+	code := agent.Exec(notify.New(), store, c.Item, c.Session, c.Title, c.Command)
+	store.Close()
+
+	// Keep the command's exit code; FatalIfErrorf would always exit 1.
+	os.Exit(code)
+	return nil
 }

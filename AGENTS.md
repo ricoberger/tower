@@ -4,128 +4,121 @@ Guidance for AI coding agents working on `tower`.
 
 ## What tower is
 
-A personal work harness for an SRE. It polls sources of work (MVP:
-Alertmanager alerts), turns each unit of work into an **item**, prepares items
-with unattended, read-only Copilot CLI runs (the `sre-analyze-alert` skill),
-and hands them to the user for decisions (resume the Copilot session in a
-Ghostty split).
-
-## Source of truth
-
-- The product specification is `SPEC.md` in the repository root. It is
-  **gitignored** and does not exist in other worktrees — always read it via
-  `/Users/ricoberger/Documents/GitHub/ricoberger/tower/SPEC.md`.
-- `MILESTONES.md` (also gitignored) holds the implementation plan.
-- If the code and `SPEC.md` disagree, or the spec is ambiguous, raise it as a
-  question instead of guessing.
-- Do not reference spec section numbers, transition IDs (T1–T14) or review
-  findings in code, comments or test names. Those documents are not in the
-  repository. Describe rules by name ("resolve", "linger expiry",
-  "manual run"; see the `internal/reconcile` package doc).
+A personal kanban board in the terminal for an SRE. Sources (today:
+Grafana-managed Alertmanagers, plus tasks) push items into **TO DO**.
+The user starts an agent (Copilot CLI) on an item, which moves it to **IN
+PROGRESS**; when the agent exits an item still in that state moves to
+**WAITING**. Existing sessions can be resumed from TO DO, WAITING or DONE
+without changing state; resolved or closed items end in **DONE**. `README.md`
+describes the behavior and configuration and is the source of truth.
+`SPEC.md` and `MILESTONES.md` (gitignored) describe the previous, replaced
+design — do not implement from them.
 
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
-| `main.go` | CLI (`version`, `config init/validate`, `prune`, `resume`, hidden `--headless`) |
-| `engine.go`, `engine_runs.go` | Engine loop: polls, reconciliation, runner, notifications, API |
-| `tui.go` | Runs the engine with the Bubble Tea TUI and wires the UI to the engine, store and Ghostty |
-| `resume.go` | `tower resume` and the shared Ghostty resume handoff (validation, `resumed-session` recording) |
-| `logging.go` | slog setup (JSON log file + stderr) |
-| `internal/config` | Config loading, `$VAR` interpolation, path resolution, validation, `$GRAFANA_INSTANCES` |
-| `internal/item` | Item store: IDs, `item.yaml`, run directories/artifacts, locking, pruning |
-| `internal/reconcile` | **Pure** lifecycle reconciler (items + snapshots + events + now → changes + effects) |
-| `internal/source` | Alert sources (`alertmanager`, `file`) |
-| `internal/prompt` | `alert.md` rendering; `prompt/prep` — the embedded preparation prompt |
-| `internal/runner` | Priority queue, detached runs, completion, timeout/cancel, recovery |
-| `internal/result` | `result.json` types, schema and validation |
-| `internal/ghostty` | Ghostty handoff through the external `ghostty-new` helper (quoted resume command) |
-| `internal/loginenv` | Captures the interactive login-shell environment (in memory only) for processes started without one |
-| `internal/bounded` | Runs short-lived external commands in their own process group with a time limit and bounded cleanup |
-| `internal/notify` | macOS notifications (terminal-notifier / osascript) |
-| `internal/snapshot` | Read-only snapshot of the engine's applied state and the non-blocking feed from engine to TUI (the engine never imports `internal/ui`) |
-| `internal/ui` | Bubble Tea TUI: renders snapshots (Markdown via glamour, sanitized), calls the engine API, editor handoff |
-| `testdata/fake-copilot.sh` | Fake Copilot CLI for runner tests (controlled by `FAKE_COPILOT_*` env vars) |
+| `main.go` | Flags, lock, startup recovery of unclaimed starts, wiring, TUI start; hidden `exec` wrapper subcommand |
+| `internal/config` | Strict config loading and resolution of nonempty `state_dir` to an absolute filesystem path (`$VAR`, `${VAR}`, `~`); package-owned settings remain zero when omitted and are parsed by their constructors |
+| `internal/config/helpers` | Shared config types and functions for config and providers (`Duration`) |
+| `internal/store` | SQLite item store (`items` table), atomic completion and conditional recovery, `Sync` rules for source snapshots, retention, `flock` lock; `Get` is retained as the single-item lookup API, also used by integration tests |
+| `internal/provider` | `Provider` interface (one per item kind: `Kind`, `Poll`, `Prompt`), the shared prompt data (`PromptData`, `RenderPrompt`) and `Set`. Providers fill the stored item fields `title`, `description`, `details` (Markdown for the prompt) and `url`; everything else uses only these fields |
+| `internal/provider/alerts` | Alerts provider: config (`Config`, `$GRAFANA_INSTANCES`), Alertmanager client, alert → item conversion (details Markdown template in Go), prompt, `Poll` loop pushing `store.Update`s on a channel |
+| `internal/provider/tasks` | Tasks provider (no polling): config, parses editor text into tasks, prompt |
+| `internal/agent` | Agent config (`Config`: `run_command`/`resume_command`), shell-like command splitting and Go-template commands (`shquote`). Starts agents via the detached `tower exec` wrapper (passes the title for the notification), the wrapper itself (`Exec`), resume, PID liveness |
+| `internal/notify` | macOS notifications via osascript |
+| `internal/app` | Config (`retention`). Consumes source updates into the store (poll errors are logged), retention loop; implements `ui.Backend` |
+| `internal/ui` | Bubble Tea TUI: four kanban columns (one per state; cards with title, time in state and description) a details popup (`K`, composited with lipgloss layers) and a statusline with the keys; failed actions are logged |
+
+New item kinds (GitHub PRs, Jira) are a self-contained package under
+`internal/provider/<kind>` implementing `provider.Provider`, registered in the
+`provider.Set` in `main.go`. The package owns its `Config` struct;
+the `config.Config.Providers` field holds it under `providers.<kind>`.
+`internal/config` decodes, checks keys and resolves `state_dir`; package-owned
+parsing and validation belong in each package's `New` (templates, commands,
+environment). Duration ranges, source-name uniqueness and required command
+placeholders are not yet fully validated. Packages whose config
+`internal/config` embeds (providers, `agent`, `app`) must not import
+`internal/config` (import cycle); shared helpers live in
+`internal/config/helpers`. `Poll` sends complete snapshots as
+`store.Update`s on the shared channel and `app` syncs them with `store.Sync`;
+`agent` and `ui` only reach the provider through the item's `kind`.
 
 ## Commands
 
 ```sh
-make build   # ./bin/tower
-make test    # go test -race ./...
-make lint    # go vet + golangci-lint (.golangci.yml); must report 0 issues
+go build -o ./bin/tower .
+go test -race ./...
+go vet ./... && golangci-lint run ./...   # .golangci.yml; must report 0 issues
 ```
 
-`make test` and `make lint` must pass before committing. While iterating,
-run targeted tests directly and keep `-race`, e.g.
-`go test -race -run TestName ./internal/runner`.
+Tests and lint must pass before committing. While iterating, run
+targeted tests with `-race`, e.g. `go test -race -run TestSync ./internal/store`.
 
-## Architecture invariants
+## Invariants
 
-- **The engine loop is the only place that mutates engine state.** Background
-  work (poll rounds, `cmd.Wait()`, ownership checks, notification delivery,
-  pruning) runs in goroutines and reports back through channels that the loop
-  selects on.
-- **Nothing blocks the engine loop.** No network calls, credential commands,
-  `ps`, notification commands or signal grace periods on the loop. New slow
-  work goes into a goroutine with a bounded timeout. Its result is delivered
-  by channel, and sends must not block after shutdown.
-- **The reconciler stays pure.** No I/O, no clock reads (`now` is an input),
-  no randomness. Side effects are returned as effects/intents and executed by
-  the engine only after the item change was persisted successfully.
-- Poll rounds run in the background: one round in flight at most, and ticks
-  are skipped while one is running. A source failure freezes only that
-  source's transitions.
-- Shutdown never kills or waits for detached preparation runs.
-
-## Processes and safety
-
-- Every external command runs with a timeout, in its own process group
-  (`Setpgid`/`Setsid`), with a bounded `WaitDelay`. On timeout the whole
-  group is killed.
-- Preparation runs: `cmd.Wait()` is used for runs this process started. The
-  PID liveness check is used only for runs re-attached after a restart.
-- **Never signal a process whose ownership is not proven.** For re-attached
-  runs, `ps -o command= -p <pid>` must contain the run's session ID before
-  **every** signal. On any failed check, send no signal and abandon the run.
-- Content is always passed as arguments or environment, never interpolated
-  into shell source or AppleScript code.
-- Never log or persist secrets: credentials, credential-command output, URL
-  userinfo, inherited environment, full prompts/argv. Redact error excerpts.
-- Preparation runs must stay read-only; that guarantee lives in the prompt
-  contract — do not weaken the embedded prompt's rules.
-
-## Persistence
-
-- State and item directories are `0700`, files `0600`; runs use `umask 077`.
-- Tower-owned documents are written atomically: same-directory temp file,
-  `fsync`, rename.
-- Item changes use the store's per-item `flock` read-modify-write
-  (`Store.Update`). Other processes (e.g. `tower resume`) may write
-  concurrently — merge, never overwrite blindly.
-- Validate item IDs and run numbers, and resolve all paths through the
-  store's safe accessors (containment, no symlinks). `Store.ItemDir` is for
-  display only.
-- Unreadable or corrupt items are logged and skipped, never repaired or
-  overwritten.
+- **Transitions:** TO DO → IN PROGRESS only by the user. `store.Finish`
+  atomically records failure status and moves a matching IN PROGRESS session
+  to WAITING; user/source moves retain their state and timestamp. Dead-wrapper
+  recovery uses `store.Recover`, conditional on the observed state, session
+  and PID, so a stale observation cannot overwrite a completed run. The
+  database stores a failure boolean; exact exit codes go to the run log.
+  Sources resolve items missing from a **successful** snapshot; failed polls
+  change nothing.
+- **Startup claims:** `store.RecoverStarts` runs once with the TUI lock held,
+  before accepting starts, and moves unclaimed IN PROGRESS sessions (PID 0)
+  to WAITING as failed. The exec wrapper must successfully claim/confirm its
+  PID with `store.SetPID` before executing the command. A late wrapper cannot
+  claim a recovered session. Periodic liveness checks skip PID 0 because a
+  new start may still be in flight.
+- **Item keys are globally unique and built by the source**
+  (`alert:<source>:<fingerprint>`, `task:<uuid>`). `Sync` matches items by
+  `key`; `kind` + `source` of the `store.Update` scope which items a snapshot
+  can resolve.
+- **Agents outlive the TUI.** `run_command` runs under `tower exec` in its own
+  session (`Setsid`), not bound to any TUI context. Quitting never stops
+  agents. The TUI never signals run agents; liveness uses `kill(pid, 0)`.
+  Wrappers forward received SIGINT/SIGTERM/SIGHUP to their agent command.
+  Resume launchers are separate: they have a 30-second timeout and a 250 ms
+  output-pipe wait limit, without signaling their descendants.
+- **No shell for configured commands.** `run_command`/`resume_command` are
+  split by the `agent` package and every argument is rendered as a Go
+  template (`command.render`). Never interpolate item data into shell source;
+  use `shquote` for values deliberately passed to a shell-based launcher.
+  The Grafana token command and `$EDITOR` launcher use `sh -c`; both command
+  strings are user configuration, and the editor path is a positional argument.
+- The SQLite database is written concurrently by the TUI and by `tower exec`
+  processes (WAL, busy timeout). Keep transactions short; use conditional
+  `UPDATE … WHERE state = ? AND session_id = ?` instead of read-modify-write.
+- Providers emit one-line titles (collapsed whitespace); the UI also
+  normalizes loaded titles for old records and future providers. Raw alert
+  details remain unchanged.
+- Polled fields update even on manually closed, still-reported DONE items.
+  Field-only updates must not reset the state, session or retention timestamp.
+- Never log or persist secrets (tokens, token-command output) deliberately.
+- State files must be `0600`, directories `0700`. SQLite file modes and the
+  permissions of existing directories are not yet explicitly enforced; the
+  current implementation relies on a private state directory for isolation.
 
 ## Testing conventions
 
-- Use isolated temp state/config directories. Never touch real
-  `~/.config/tower`, credentials, Grafana, Copilot or desktop notifications.
-- Runner/engine tests use `testdata/fake-copilot.sh` via `runs.command`. Test
-  controls are env vars, never user configuration.
-- Timing is injected (`engineOptions`, `runner.Options`: clock, tick/monitor
-  channels, grace, `Owns`, `Signal`, `deliver`). Prefer injected channels and
-  hooks over sleeps. Production defaults must not change for tests.
-- Tests that spawn process groups must clean them up, including on failure.
-- Table-driven tests with named subtests; names describe behavior.
+- Use temp directories for state and config. Never touch the real
+  `~/.config/tower`, Grafana, Copilot or desktop notifications
+  (tests pass a fake `agent.Notifier` to `Exec`).
+- `internal/agent` tests use the test binary as the `tower exec` wrapper
+  (see `TestMain`) and `sh -c` as the agent.
+- Store tests cover stale recovery observations across connections, atomic
+  failure handling and both orderings of startup recovery versus wrapper claims.
+  Keep recovery outside periodic reads of pending starts.
+- UI tests drive the model with a fake `Backend` and check `Render()` output
+  with ANSI stripped, including short-terminal resizes and multiline titles.
+- Table-driven tests where it fits; names describe behavior.
 
 ## Code conventions
 
-- Go version per `go.mod`; formatting via `gofmt`/`goimports` (enforced by
-  the linter). Keep dependencies minimal.
-- Logging: `log/slog` with `item_id`, `run` and `source` attributes where
-  applicable. Warn for recoverable failures, error for failed persistence.
+- Go version per `go.mod`; `gofmt`/`goimports` are enforced by the linter.
+  Keep dependencies minimal (SQLite is `modernc.org/sqlite`, pure Go).
+- Logging goes to `state_dir/tower.log` via `log/slog` (the TUI owns the
+  terminal).
 - Comments explain *why*, not *what*. Doc comments on exported identifiers.
-- Commits follow Conventional Commits (`feat(runner): …`, `fix(engine): …`,
-  `test: …`, `docs: …`), with a body explaining the reason for the change.
+- Commits follow Conventional Commits with a body explaining the reason.
