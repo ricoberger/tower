@@ -32,7 +32,7 @@ design — do not implement from them.
 | `internal/agent` | Agent config (`Config`: `run_command`/`resume_command`/`working_dir`, both commands run in `working_dir`), shell-like command splitting and Go-template commands (`shquote`). Starts agents via the detached `tower exec` wrapper (passes the title for the notification), the wrapper itself (`Exec`), resume, PID liveness |
 | `internal/notify` | macOS notifications via osascript |
 | `internal/app` | Config (`retention`). Consumes source updates into the store (poll errors are logged), retention loop; implements `ui.Backend` |
-| `internal/ui` | Bubble Tea TUI: four kanban columns (one per state; cards with title, time in state and description) a details popup (`K`, composited with lipgloss layers) and a statusline with the keys; failed actions are logged |
+| `internal/ui` | Bubble Tea TUI: four kanban columns (one per state; cards with title, time in state and description) a details popup (`K`, composited with lipgloss layers, Markdown rendered with glamour) and a statusline with the keys; failed actions are logged |
 
 New item kinds (e.g. GitLab merge requests) are a self-contained package under
 `internal/provider/<kind>` implementing `provider.Provider`, registered in the
@@ -222,6 +222,12 @@ User-visible behavior that changes must stay consistent with these rules
 - Keys that don't apply to the selected item do nothing; failures are logged,
   not shown. `o` opens the item URL with macOS `open`; `L` opens the run log in
   `$EDITOR`; `R` polls all sources now.
+- The details popup renders the Markdown with glamour using the style from
+  `$GLAMOUR_STYLE` (`glamour.WithEnvironmentConfig`, default `dark`; no
+  terminal background query). The result is cached per item, text and width;
+  render errors are logged and fall back to the plain, wrapped text. One
+  empty row of padding stays fixed above and below the scrolling content when
+  the popup has at least five content rows.
 
 ## Testing conventions
 
@@ -238,6 +244,7 @@ User-visible behavior that changes must stay consistent with these rules
   Keep recovery outside periodic reads of pending starts.
 - UI tests drive the model with a fake `Backend` and check `Render()` output
   with ANSI stripped, including short-terminal resizes and multiline titles.
+  `TestMain` sets `GLAMOUR_STYLE=notty` so the user's style never affects them.
 - Table-driven tests where it fits; names describe behavior.
 
 ## Code conventions
