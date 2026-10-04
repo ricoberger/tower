@@ -216,7 +216,9 @@ User-visible behavior that changes must stay consistent with these rules
 
 - The board needs at least 20 columns per state (80 total) and 4 rows,
   otherwise it renders `terminal too small`. Cards show the title, time in
-  state and up to three description lines.
+  state and up to three description lines. Every column is sorted by time in
+  state (`updated_at`), the most recent first; `created_at` is not used for
+  ordering.
 - Keys that don't apply to the selected item do nothing; failures are logged,
   not shown. `o` opens the item URL with macOS `open`; `L` opens the run log in
   `$EDITOR`; `R` polls all sources now.

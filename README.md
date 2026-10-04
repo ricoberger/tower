@@ -22,8 +22,8 @@ p progress · r resume · d done · t todo · n new · o open · K details · L 
 ```
 
 Each column is a state. A card shows the item's title with the time since it
-entered its state and up to three lines of its description. The statusline shows
-the keys.
+entered its state and up to three lines of its description. Cards are sorted by
+that time, the most recent first. The statusline shows the keys.
 
 ## States
 

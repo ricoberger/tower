@@ -133,7 +133,7 @@ func (m *Model) setItems(items []store.Item) {
 		}
 	}
 	for i := range sections {
-		m.sort(i, sections[i])
+		m.sort(sections[i])
 		if selected[i] != 0 {
 			if j := slices.IndexFunc(sections[i], func(it store.Item) bool { return it.ID == selected[i] }); j >= 0 {
 				m.cursor[i] = j
@@ -144,16 +144,13 @@ func (m *Model) setItems(items []store.Item) {
 	m.sections = sections
 }
 
-// sort orders items newest first; DONE is ordered most recently done first.
-func (m *Model) sort(section int, items []store.Item) {
-	if store.States[section] == store.StateDone {
-		slices.SortStableFunc(items, func(a, b store.Item) int {
-			return cmpInt64(b.UpdatedAt.Unix(), a.UpdatedAt.Unix(), b.ID, a.ID)
-		})
-		return
-	}
+// sort orders items by the time they entered their state, most recent first,
+// so the order matches the age shown on the cards. The source's creation time
+// is not comparable across kinds and can predate the item's arrival on the
+// board.
+func (m *Model) sort(items []store.Item) {
 	slices.SortStableFunc(items, func(a, b store.Item) int {
-		return cmpInt64(b.CreatedAt.Unix(), a.CreatedAt.Unix(), b.ID, a.ID)
+		return cmpInt64(b.UpdatedAt.Unix(), a.UpdatedAt.Unix(), b.ID, a.ID)
 	})
 }
 

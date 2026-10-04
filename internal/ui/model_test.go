@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -95,14 +96,30 @@ func run(m *Model, cmd tea.Cmd) {
 	}
 }
 
-func TestSorting(t *testing.T) {
-	m, _ := fixture()
-	var ids []int64
-	for _, it := range m.sections[0] {
-		ids = append(ids, it.ID)
+func TestSortingByTimeInState(t *testing.T) {
+	m, f := fixture()
+	var items []store.Item
+	for i, state := range store.States {
+		base := int64(10 * (i + 1))
+		// Creation order is the reverse of the order the items entered the state;
+		// the last two share the same time and are ordered by ID.
+		items = append(items,
+			store.Item{ID: base + 1, Kind: tasks.Kind, State: state, CreatedAt: now.Add(-time.Minute), UpdatedAt: now.Add(-3 * time.Hour)},
+			store.Item{ID: base + 2, Kind: tasks.Kind, State: state, CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Minute)},
+			store.Item{ID: base + 3, Kind: tasks.Kind, State: state, CreatedAt: now.Add(-3 * time.Hour), UpdatedAt: now.Add(-2 * time.Minute)},
+		)
 	}
-	if len(ids) != 3 || ids[0] != 3 || ids[1] != 1 || ids[2] != 2 {
-		t.Fatalf("TO DO order = %v", ids)
+	f.items = items
+	m.Update(itemsMsg{items: f.items})
+	for i, state := range store.States {
+		var ids []int64
+		for _, it := range m.sections[i] {
+			ids = append(ids, it.ID)
+		}
+		base := int64(10 * (i + 1))
+		if want := []int64{base + 3, base + 2, base + 1}; !slices.Equal(ids, want) {
+			t.Errorf("%s order = %v, want %v", state, ids, want)
+		}
 	}
 }
 
@@ -132,7 +149,7 @@ func TestActions(t *testing.T) {
 		t.Fatal("p on IN PROGRESS did something")
 	}
 	press(m, "l")
-	press(m, "G")
+	press(m, "g") // item 5 entered WAITING most recently
 	run(m, press(m, "r"))
 	if len(f.resumed) != 1 || f.resumed[0] != 5 {
 		t.Fatalf("resumed = %v", f.resumed)
@@ -178,7 +195,7 @@ func TestResumeWithExistingSession(t *testing.T) {
 func TestSelectionFollowsItem(t *testing.T) {
 	m, f := fixture()
 	press(m, "j") // item 1
-	f.items = append(f.items, store.Item{ID: 9, Kind: alerts.Kind, Title: "Oldest of all", State: store.StateTodo, CreatedAt: now.Add(-4 * time.Hour)})
+	f.items = append(f.items, store.Item{ID: 9, Kind: alerts.Kind, Title: "Oldest of all", State: store.StateTodo, CreatedAt: now.Add(-4 * time.Hour), UpdatedAt: now.Add(-4 * time.Hour)})
 	m.Update(itemsMsg{items: f.items})
 	if it, _ := m.selected(); it.ID != 1 {
 		t.Fatalf("selected = %d", it.ID)
@@ -286,7 +303,7 @@ func TestActionErrorsAreLogged(t *testing.T) {
 func TestScrolling(t *testing.T) {
 	m, f := fixture()
 	for i := range 40 {
-		f.items = append(f.items, store.Item{ID: int64(100 + i), Kind: tasks.Kind, Title: "t", State: store.StateTodo, CreatedAt: now.Add(time.Duration(i))})
+		f.items = append(f.items, store.Item{ID: int64(100 + i), Kind: tasks.Kind, Title: "t", State: store.StateTodo, CreatedAt: now.Add(time.Duration(i)), UpdatedAt: now.Add(time.Duration(i))})
 	}
 	m.Update(itemsMsg{items: f.items})
 	press(m, "G")
@@ -299,7 +316,7 @@ func TestScrolling(t *testing.T) {
 func TestHalfPage(t *testing.T) {
 	m, f := fixture()
 	for i := range 40 {
-		f.items = append(f.items, store.Item{ID: int64(100 + i), Kind: tasks.Kind, Title: "t", State: store.StateTodo, CreatedAt: now.Add(time.Duration(i))})
+		f.items = append(f.items, store.Item{ID: int64(100 + i), Kind: tasks.Kind, Title: "t", State: store.StateTodo, CreatedAt: now.Add(time.Duration(i)), UpdatedAt: now.Add(time.Duration(i))})
 	}
 	m.Update(itemsMsg{items: f.items})
 	press(m, "g")
