@@ -35,6 +35,16 @@ providers:
       - name: review-requested
         query: is:open review-requested:@me -author:app/dependabot
     prompt: "Review {{.URL}}"
+  jira:
+    poll_interval: 5m
+    sources:
+      - name: assigned
+        jql: 'assignee = currentUser() ORDER BY updated DESC'
+      - name: team
+        jql: 'project = DEMO AND labels = "needs-attention" ORDER BY priority DESC'
+    prompt: |
+      Work on the Jira ticket {{.Title}}.
+      {{.Details}}
   tasks:
     prompt: "{{.Title}}: {{.Description}}"
 `
@@ -69,12 +79,21 @@ func TestLoad(t *testing.T) {
 	if pr := cfg.Providers.PullRequests; pr.MaxAge.Duration != 336*time.Hour || pr.Sources[0].Query != "is:open review-requested:@me -author:app/dependabot" {
 		t.Errorf("pullrequests = %+v", pr)
 	}
+	j := cfg.Providers.Jira
+	if j.PollInterval.Duration != 5*time.Minute || len(j.Sources) != 2 || j.Prompt != "Work on the Jira ticket {{.Title}}.\n{{.Details}}\n" {
+		t.Errorf("jira = %+v", j)
+	}
+	if s := j.Sources[1]; s.Name != "team" || s.JQL != `project = DEMO AND labels = "needs-attention" ORDER BY priority DESC` {
+		t.Errorf("jira source = %+v", s)
+	}
 }
 
 func TestLoadErrors(t *testing.T) {
 	tests := []struct{ name, from, to, want string }{
 		{name: "unknown key", from: "  retention: 48h\n", to: "  retention: 48h\n  foo: bar\n", want: `unknown field "foo"`},
 		{name: "unknown list key", from: "        grafana_instance: dev\n", to: "        type: alertmanager\n        grafana_instance: dev\n", want: `unknown field "type"`},
+		{name: "unknown jira key", from: "  jira:\n", to: "  jira:\n    max_age: 24h\n", want: `unknown field "max_age"`},
+		{name: "unknown jira source key", from: "      - name: assigned\n", to: "      - name: assigned\n        query: x\n", want: `unknown field "query"`},
 		{name: "bad duration", from: "retention: 48h", to: "retention: 2d", want: "invalid duration"},
 	}
 	for _, tt := range tests {

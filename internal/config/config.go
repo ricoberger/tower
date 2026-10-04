@@ -12,6 +12,7 @@ import (
 	"github.com/ricoberger/tower/internal/app"
 	"github.com/ricoberger/tower/internal/config/helpers"
 	"github.com/ricoberger/tower/internal/provider/alerts"
+	"github.com/ricoberger/tower/internal/provider/jira"
 	"github.com/ricoberger/tower/internal/provider/pullrequests"
 	"github.com/ricoberger/tower/internal/provider/tasks"
 )
@@ -27,6 +28,7 @@ type Config struct {
 	Providers struct {
 		Alerts       alerts.Config       `yaml:"alerts"`
 		PullRequests pullrequests.Config `yaml:"pullrequests"`
+		Jira         jira.Config         `yaml:"jira"`
 		Tasks        tasks.Config        `yaml:"tasks"`
 	} `yaml:"providers"`
 }
