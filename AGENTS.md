@@ -38,8 +38,11 @@ New item kinds (GitHub PRs, Jira) are a self-contained package under
 the `config.Config.Providers` field holds it under `providers.<kind>`.
 `internal/config` decodes, checks keys and resolves `state_dir`; package-owned
 parsing and validation belong in each package's `New` (templates, commands,
-environment). Duration ranges, source-name uniqueness and required command
-placeholders are not yet fully validated. Packages whose config
+environment). Validation is still incomplete: the pull requests provider
+validates its options (positive durations, nonempty prompt, nonempty and
+unique source names, nonempty queries) when sources are configured, but the
+alerts provider, `app` and `agent` do not check duration ranges, source-name
+uniqueness or required command placeholders. Packages whose config
 `internal/config` embeds (providers, `agent`, `app`) must not import
 `internal/config` (import cycle); shared helpers live in
 `internal/config/helpers`. `Poll` sends complete snapshots as
@@ -105,6 +108,87 @@ targeted tests with `-race`, e.g. `go test -race -run TestSync ./internal/store`
 - State files must be `0600`, directories `0700`. SQLite file modes and the
   permissions of existing directories are not yet explicitly enforced; the
   current implementation relies on a private state directory for isolation.
+
+## Behavior reference
+
+User-visible behavior that changes must stay consistent with these rules
+(and with `README.md` where it documents them).
+
+### Lifecycle and retention
+
+- Alerts: a resolved alert that fires again within `reopen_window` reopens its
+  item (back to TO DO, keeping its session); after the window it becomes a new
+  item. Pull requests pass an unlimited window. Retention should be at least
+  `reopen_window`, otherwise items are deleted before they can reopen.
+- Retention runs at startup and hourly and deletes DONE items together with
+  their run logs. Omitted or zero `retention` deletes all DONE items.
+- Sources may move an item to DONE while its agent runs; the agent is not
+  stopped. User moves (`t`, `d`) never stop agents either.
+- `p` always starts a new session; `r` reuses the stored session (TO DO,
+  WAITING or DONE, including after `t`) and never changes state.
+- The macOS notification is shown only when a run moves its item to WAITING.
+
+### Agent commands
+
+- Splitting: whitespace, `'…'`, `"…"` and `\` escapes; unquoted `; | & ( )` and
+  backticks are rejected; environment variables are not expanded. Template
+  actions (`{{ … }}`) stay together while splitting (also with spaces, quotes
+  or `}}` in strings/comments), except inside single quotes. A rendered value
+  is always exactly one argument.
+- Template fields: `.Prompt` (`run_command` only, required there),
+  `.SessionID` (new UUID per run, required in both), `.ID`, `.Title`; plus the
+  `shquote` function.
+- `working_dir` is expanded like `state_dir`, must be an existing directory at
+  startup, and is set as `$PWD` (launchers such as `ghostty-new` rely on it).
+  Agents inherit tower's environment.
+- `run_command`: detached, stdin `/dev/null`, output to
+  `state_dir/runs/<item>.log`, no timeout, no concurrency limit.
+- `resume_command`: stdin `/dev/null`, output captured only for error
+  diagnostics, limits as described under Invariants.
+
+### Prompts
+
+- `text/template` per provider (`providers.<kind>.prompt`); unknown fields are
+  errors. All providers get the same `provider.PromptData`: `ID`, `Kind`,
+  `Source`, `Title`, `Description`, `Details`, `URL` (`Details` and `URL`
+  are empty for tasks).
+
+### Providers
+
+- Alerts: Grafana-managed Alertmanagers only. URL and token command come from
+  `$GRAFANA_INSTANCES` (JSON keyed by instance name with `url` and
+  `auth.tokenCommand`); it must be valid JSON even without alert sources
+  (known limitation). The token command runs via `sh -c` on every poll; HTTP
+  requests time out after 15 s. Silenced and inhibited alerts are treated like
+  firing ones. Title: `alertname · severity · source`; description: `summary`
+  and `description` annotations; URL: generator URL.
+- Pull requests: `gh search prs` with a 30-second timeout and `gh`'s own login
+  (tower handles no tokens). `gh` and the other options are only required when
+  sources are configured. The query is split at whitespace (no quote support);
+  `updated:` is day-granular (UTC). Items are per source, so one pull request
+  matched by two queries is two cards. Title: `owner/repo#number · title`;
+  description: `@author` (plus `· draft`) and the body. Branches and review
+  state are not fetched. Merged, closed or stale (older than `max_age`) pull
+  requests resolve to DONE.
+- Tasks: created with `n` in `$EDITOR`; the first non-empty line is the title,
+  the rest the description; empty input cancels.
+
+### Configuration
+
+- Unknown options are errors and there are no defaults.
+- A relative `state_dir` resolves against the working directory tower was
+  started in, not the config file's directory; `?`, `#` and `%` are literal
+  filename characters. Only one tower runs per state directory (lock).
+- A nonpositive alerts `poll_interval` crashes tower (known limitation).
+
+### UI
+
+- The board needs at least 20 columns per state (80 total) and 4 rows,
+  otherwise it renders `terminal too small`. Cards show the title, time in
+  state and up to three description lines.
+- Keys that don't apply to the selected item do nothing; failures are logged,
+  not shown. `o` opens the item URL with macOS `open`; `L` opens the run log in
+  `$EDITOR`; `R` polls all sources now.
 
 ## Testing conventions
 
