@@ -1,6 +1,6 @@
-// Command tower is a personal work board: alerts and tasks flow into TO DO,
-// agents work on them in IN PROGRESS, finished sessions wait for the user in
-// WAITING and resolved work ends in DONE.
+// Command tower is a personal work board: alerts, pull requests and tasks flow
+// into TO DO, agents work on them in IN PROGRESS, finished sessions wait for
+// the user in WAITING and resolved work ends in DONE.
 package main
 
 import (
@@ -23,6 +23,7 @@ import (
 	"github.com/ricoberger/tower/internal/notify"
 	"github.com/ricoberger/tower/internal/provider"
 	"github.com/ricoberger/tower/internal/provider/alerts"
+	"github.com/ricoberger/tower/internal/provider/pullrequests"
 	"github.com/ricoberger/tower/internal/provider/tasks"
 	"github.com/ricoberger/tower/internal/store"
 	"github.com/ricoberger/tower/internal/ui"
@@ -84,7 +85,11 @@ func (c *TUICmd) Run() error {
 	if err != nil {
 		return fmt.Errorf("tasks provider: %w", err)
 	}
-	providers := provider.Set{alertsProvider, tasksProvider}
+	pullRequestsProvider, err := pullrequests.New(cfg.Providers.PullRequests)
+	if err != nil {
+		return fmt.Errorf("pull requests provider: %w", err)
+	}
+	providers := provider.Set{alertsProvider, pullRequestsProvider, tasksProvider}
 
 	agent, err := agent.New(cfg.Agent, cfg.StateDir, exe, store, providers)
 	if err != nil {
