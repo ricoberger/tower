@@ -3,6 +3,8 @@ package jira
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +46,10 @@ func newSyncer(t *testing.T) *syncer {
 		return []byte(y.out[args[4]]), y.err[args[4]]
 	}
 	p.now = func() time.Time { return y.now }
+	p.siteConfig = filepath.Join(t.TempDir(), "jira_config.yaml")
+	if err := os.WriteFile(p.siteConfig, []byte("- site: "+site+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return y
 }
 

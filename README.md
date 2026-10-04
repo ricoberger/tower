@@ -164,8 +164,10 @@ providers:
   # the details contain the key, source, status, type, priority, assignee,
   # reporter, labels and the description (no comments, subtasks, links or
   # timestamps, which acli's search does not provide). Jira Cloud descriptions (ADF) are rendered to Markdown by tower
-  # itself. The browser link (`o`) is derived from the site of the ticket's API
-  # URL; when acli only reports an API gateway URL, there is no link.
+  # itself. The browser link (`o`) is `https://<site>/browse/<KEY>`, where the
+  # site is the first `site:` entry of `~/.config/acli/jira_config.yaml` (read
+  # on every poll; nothing else from that file is used). Without that file or
+  # site, cards have no link.
   jira:
     # Interval between polls.
     poll_interval: 5m

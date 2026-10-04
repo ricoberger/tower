@@ -3,6 +3,7 @@
 package jira
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -10,7 +11,9 @@ import (
 	"fmt"
 	"math"
 	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -62,8 +65,7 @@ type SourceConfig struct {
 // Issue is one decoded result of acli jira workitem search. Optional fields
 // are zero when Jira omits them or returns an unexpected type.
 type Issue struct {
-	Key  string
-	Self string
+	Key string
 	// Status and StatusCategory are the workflow status name and the key of
 	// its category (new, indeterminate or done).
 	Status             string
@@ -91,11 +93,14 @@ type runner func(ctx context.Context, args []string) ([]byte, error)
 
 // Provider is the Jira provider.
 type Provider struct {
-	cfg     Config
-	tmpl    *template.Template
-	run     runner
-	now     func() time.Time
-	timeout time.Duration
+	cfg  Config
+	tmpl *template.Template
+	run  runner
+	// siteConfig is acli's Jira config file, the source of the site for the
+	// browser links. Empty when the home directory is unknown.
+	siteConfig string
+	now        func() time.Time
+	timeout    time.Duration
 }
 
 // New creates the Jira provider. Without sources it never polls and the
@@ -129,12 +134,23 @@ func New(cfg Config) (*Provider, error) {
 	}
 
 	return &Provider{
-		cfg:     cfg,
-		tmpl:    tmpl,
-		run:     runAcli,
-		now:     time.Now,
-		timeout: timeout,
+		cfg:        cfg,
+		tmpl:       tmpl,
+		run:        runAcli,
+		siteConfig: defaultSiteConfig(),
+		now:        time.Now,
+		timeout:    timeout,
 	}, nil
+}
+
+// defaultSiteConfig returns the path of acli's Jira config file, or "" when
+// the home directory is unknown.
+func defaultSiteConfig() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "acli", "jira_config.yaml")
 }
 
 // Kind implements provider.Provider.
@@ -185,7 +201,9 @@ func (p *Provider) update(ctx context.Context, s SourceConfig) store.Update {
 	u := store.Update{Kind: Kind, Source: s.Name, At: p.now(), ReopenWindow: time.Duration(math.MaxInt64)}
 	issues, err := p.Fetch(ctx, s)
 	if err == nil {
-		u.Items = Items(s, issues)
+		// The site is read on every poll, so switching acli's profile takes
+		// effect without restarting tower.
+		u.Items = Items(s, issues, Site(p.siteConfig))
 	}
 	u.Err = err
 	return u
@@ -213,7 +231,6 @@ func Args(s SourceConfig) []string {
 // rawIssue is the part of a search result that is decoded strictly.
 type rawIssue struct {
 	Key    string                     `json:"key"`
-	Self   string                     `json:"self"`
 	Fields map[string]json.RawMessage `json:"fields"`
 }
 
@@ -247,7 +264,7 @@ func Decode(data []byte) ([]Issue, error) {
 // decodeFields decodes the status strictly and every optional field on its
 // own, so an unexpected optional value cannot fail the poll.
 func decodeFields(r rawIssue) (Issue, error) {
-	is := Issue{Key: r.Key, Self: r.Self}
+	is := Issue{Key: r.Key}
 	var status struct {
 		Name           string `json:"name"`
 		StatusCategory struct {
@@ -285,22 +302,24 @@ func decodeFields(r rawIssue) (Issue, error) {
 	return is, nil
 }
 
-// Items converts the tickets of a source into items. Done tickets are left
-// out, so that Sync resolves cards of tickets that were completed and does
-// not create cards for already completed ones.
-func Items(s SourceConfig, issues []Issue) []store.Incoming {
+// Items converts the tickets of a source into items, linking them to the
+// Jira site (see Site). Done tickets are left out, so that Sync resolves
+// cards of tickets that were completed and does not create cards for already
+// completed ones.
+func Items(s SourceConfig, issues []Issue, site string) []store.Incoming {
 	items := make([]store.Incoming, 0, len(issues))
 	for _, is := range issues {
 		if is.Done() {
 			continue
 		}
-		items = append(items, Item(s, is))
+		items = append(items, Item(s, is, site))
 	}
 	return items
 }
 
-// Item converts a ticket of a source into an item.
-func Item(s SourceConfig, is Issue) store.Incoming {
+// Item converts a ticket of a source into an item, linking it to the Jira
+// site (see Site).
+func Item(s SourceConfig, is Issue, site string) store.Incoming {
 	desc := Description(is.Description)
 	assignee := is.Assignee
 	if assignee == "" {
@@ -310,7 +329,7 @@ func Item(s SourceConfig, is Issue) store.Incoming {
 	if is.Status != "" {
 		meta = is.Status + " · " + assignee
 	}
-	link := BrowseURL(is.Self, is.Key)
+	link := BrowseURL(site, is.Key)
 	created, _ := parseTime(is.Created)
 	return store.Incoming{
 		Key:         Kind + ":" + s.Name + ":" + is.Key,
@@ -330,28 +349,47 @@ func summaryTitle(summary string) string {
 	return "· " + summary
 }
 
-// BrowseURL derives the ticket's browser link from its REST self URL, e.g.
-// https://example.atlassian.net/rest/api/3/issue/10001 →
-// https://example.atlassian.net/browse/DEMO-42. URLs that do not point at a
-// Jira site (API gateway URLs with a cloud ID) yield no link, because the
-// site cannot be derived from them.
-func BrowseURL(self, key string) string {
-	u, err := url.Parse(strings.TrimSpace(self))
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil {
+// siteLine matches the site entries of acli's Jira config file, e.g.
+// "site: example.atlassian.net" or "  - site: \"example.atlassian.net\"",
+// like the fzfjira script does.
+var siteLine = regexp.MustCompile(`^[[:space:]]*-?[[:space:]]*site:[[:space:]]*(.*)$`)
+
+// Site returns the first site value of acli's Jira config file at path, with
+// double quotes removed, e.g. example.atlassian.net. A missing or unreadable
+// file or one without a site yields "": the ticket links are only a
+// convenience and must not fail the poll. Only the site is used; the file
+// contents are never logged.
+func Site(path string) string {
+	if path == "" {
 		return ""
 	}
-	if strings.EqualFold(u.Hostname(), "api.atlassian.com") {
+	f, err := os.Open(path)
+	if err != nil {
 		return ""
 	}
-	i := strings.Index(u.Path, "/rest/api/")
-	if i < 0 || !strings.Contains(u.Path[i:], "/issue/") {
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if m := siteLine.FindStringSubmatch(sc.Text()); m != nil {
+			return strings.TrimSpace(strings.ReplaceAll(m[1], `"`, ""))
+		}
+	}
+	return ""
+}
+
+// BrowseURL returns the ticket's browser link on a Jira site host, e.g.
+// example.atlassian.net and DEMO-42 → https://example.atlassian.net/browse/DEMO-42.
+// Sites that are not a plain host (empty, with a scheme, path, user info or
+// whitespace) yield no link.
+func BrowseURL(site, key string) string {
+	if site == "" || strings.ContainsAny(site, "/\\?#@ \t\r\n") {
 		return ""
 	}
-	base := u.Path[:i]
-	if strings.Contains(base, "/ex/jira/") {
+	u, err := url.Parse("https://" + site)
+	if err != nil || u.Host != site {
 		return ""
 	}
-	return (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: base + "/browse/" + key}).String()
+	return "https://" + site + "/browse/" + key
 }
 
 // Jira timestamps use numeric offsets without a colon
