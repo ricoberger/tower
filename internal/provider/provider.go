@@ -1,6 +1,5 @@
-// Package provider defines the interface of the item modules (alerts, tasks
-// and later pull requests or Jira tickets). Every provider handles one item
-// kind.
+// Package provider defines the interface of the item modules (alerts, pull
+// requests, Jira tickets and tasks). Every provider handles one item kind.
 package provider
 
 import (

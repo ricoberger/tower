@@ -5,7 +5,8 @@ Guidance for AI coding agents working on `tower`.
 ## What tower is
 
 A personal kanban board in the terminal for an SRE. Sources (today:
-Grafana-managed Alertmanagers and GitHub pull request searches, plus tasks)
+Grafana-managed Alertmanagers, GitHub pull request searches and Jira JQL
+searches, plus tasks)
 push items into **TO DO**.
 The user starts an agent (Copilot CLI) on an item, which moves it to **IN
 PROGRESS**; when the agent exits an item still in that state moves to
@@ -26,21 +27,23 @@ design — do not implement from them.
 | `internal/provider` | `Provider` interface (one per item kind: `Kind`, `Poll`, `Prompt`), the shared prompt data (`PromptData`, `RenderPrompt`) and `Set`. Providers fill the stored item fields `title`, `description`, `details` (Markdown for the prompt) and `url`; everything else uses only these fields |
 | `internal/provider/alerts` | Alerts provider: config (`Config`, `$GRAFANA_INSTANCES`), Alertmanager client, alert → item conversion (details Markdown template in Go), prompt, `Poll` loop pushing `store.Update`s on a channel |
 | `internal/provider/pullrequests` | Pull requests provider: config and validation in `New`, `gh search prs` runner (injectable for tests, no shell, `--` before the query terms, `updated:>=` from `max_age`), pull request → item conversion, prompt, `Poll` loop |
+| `internal/provider/jira` | Jira provider: config and validation in `New`, `acli jira workitem search` runner (injectable for tests, no shell, JQL as one argument, `--paginate`), strict decoding of key/status category, issue → item conversion, built-in ADF → Markdown description renderer (`adf.go`), prompt, `Poll` loop |
 | `internal/provider/tasks` | Tasks provider (no polling): config, parses editor text into tasks, prompt |
 | `internal/agent` | Agent config (`Config`: `run_command`/`resume_command`/`working_dir`, both commands run in `working_dir`), shell-like command splitting and Go-template commands (`shquote`). Starts agents via the detached `tower exec` wrapper (passes the title for the notification), the wrapper itself (`Exec`), resume, PID liveness |
 | `internal/notify` | macOS notifications via osascript |
 | `internal/app` | Config (`retention`). Consumes source updates into the store (poll errors are logged), retention loop; implements `ui.Backend` |
 | `internal/ui` | Bubble Tea TUI: four kanban columns (one per state; cards with title, time in state and description) a details popup (`K`, composited with lipgloss layers) and a statusline with the keys; failed actions are logged |
 
-New item kinds (GitHub PRs, Jira) are a self-contained package under
+New item kinds (e.g. GitLab merge requests) are a self-contained package under
 `internal/provider/<kind>` implementing `provider.Provider`, registered in the
 `provider.Set` in `main.go`. The package owns its `Config` struct;
 the `config.Config.Providers` field holds it under `providers.<kind>`.
 `internal/config` decodes, checks keys and resolves `state_dir`; package-owned
 parsing and validation belong in each package's `New` (templates, commands,
-environment). Validation is still incomplete: the pull requests provider
-validates its options (positive durations, nonempty prompt, nonempty and
-unique source names, nonempty queries) when sources are configured, but the
+environment). Validation is still incomplete: the pull requests and Jira
+providers validate their options (positive durations, nonempty prompt,
+nonempty and unique source names, nonempty queries/JQL) when sources are
+configured, but the
 alerts provider, `app` and `agent` do not check duration ranges, source-name
 uniqueness or required command placeholders. Packages whose config
 `internal/config` embeds (providers, `agent`, `app`) must not import
@@ -78,7 +81,8 @@ targeted tests with `-race`, e.g. `go test -race -run TestSync ./internal/store`
   new start may still be in flight.
 - **Item keys are globally unique and built by the source**
   (`alert:<source>:<fingerprint>`,
-  `pullrequest:<source>:<owner>/<repo>#<number>`, `task:<uuid>`). `Sync` matches items by
+  `pullrequest:<source>:<owner>/<repo>#<number>`,
+  `jira:<source>:<issue-key>`, `task:<uuid>`). `Sync` matches items by
   `key`; `kind` + `source` of the `store.Update` scope which items a snapshot
   can resolve.
 - **Agents outlive the TUI.** `run_command` runs under `tower exec` in its own
@@ -99,6 +103,10 @@ targeted tests with `-race`, e.g. `go test -race -run TestSync ./internal/store`
 - Pull request snapshots must be complete: a search reaching the 1000-result
   limit fails the poll instead of resolving the cut-off items. Pull requests
   use an unlimited reopen window, so retention alone bounds reopening.
+- Jira snapshots must be complete too: searches always use `--paginate`
+  (never `--limit`), and a result with a missing/invalid issue key or status
+  category key fails the poll instead of dropping the ticket. Jira also uses
+  an unlimited reopen window.
 - Providers emit one-line titles (collapsed whitespace); the UI also
   normalizes loaded titles for old records and future providers. Raw alert
   details remain unchanged.
@@ -118,7 +126,7 @@ User-visible behavior that changes must stay consistent with these rules
 
 - Alerts: a resolved alert that fires again within `reopen_window` reopens its
   item (back to TO DO, keeping its session); after the window it becomes a new
-  item. Pull requests pass an unlimited window. Retention should be at least
+  item. Pull requests and Jira tickets pass an unlimited window. Retention should be at least
   `reopen_window`, otherwise items are deleted before they can reopen.
 - Retention runs at startup and hourly and deletes DONE items together with
   their run logs. Omitted or zero `retention` deletes all DONE items.
@@ -170,6 +178,25 @@ User-visible behavior that changes must stay consistent with these rules
   description: `@author` (plus `· draft`) and the body. Branches and review
   state are not fetched. Merged, closed or stale (older than `max_age`) pull
   requests resolve to DONE.
+- Jira: `acli jira workitem search --jql <jql> --fields … --paginate --json`
+  with a 30-second timeout per invocation and `acli`'s active Jira login and
+  site (tower handles no credentials and never starts a login). `acli` and the
+  other options are only required when sources are configured. The JQL is one
+  unchanged argument; tower adds no filters. Only the fields needed for the
+  card are requested (no comments, subtasks, links or custom fields). Tickets
+  whose `status.statusCategory.key` is `done` are left out of the snapshot, so
+  they resolve existing cards (also when the JQL still returns them) and never
+  create new ones; tickets that stop matching resolve too. Status names and
+  colors are never used for completion. Items are per source. Title:
+  `KEY · summary`; description: `status · assignee` (`Unassigned` when
+  absent) and the description. Plain-string descriptions are kept; ADF
+  descriptions are rendered by the built-in renderer (no external converter),
+  unreadable ones become a placeholder. URL: `<site>/browse/<KEY>` derived
+  from the issue's `self` URL; empty for API-gateway (`api.atlassian.com`,
+  `/ex/jira/`) or missing `self` URLs. `acli` search rejects the `created`
+  and `updated` fields ("not allowed"), so they are not requested and new
+  cards use the poll time; if `acli` reports them anyway, `created` (Jira
+  `+0100` offsets and RFC3339) and both timestamps in the details are used.
 - Tasks: created with `n` in `$EDITOR`; the first non-empty line is the title,
   the rest the description; empty input cancels.
 

@@ -36,21 +36,21 @@ the keys.
 
 ## Keys
 
-| Key                                  | Action                                                                                                                                |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `l` / `h`, `→` / `←`                 | Next / previous column                                                                                                                |
-| `j` / `k`, `↓` / `↑`, `g` / `G`      | Move / first / last                                                                                                                   |
-| `ctrl+d` / `ctrl+u`, `PgDn` / `PgUp` | Move half the visible cards down / up                                                                                                 |
-| `p`                                  | Start an agent on a TO DO item (moves it to IN PROGRESS)                                                                              |
-| `r`                                  | Resume an existing session of a TO DO, WAITING or DONE item, without changing its state                                               |
-| `d`                                  | Move to DONE                                                                                                                          |
-| `t`                                  | Move back to TO DO                                                                                                                    |
-| `n`                                  | New task in `$EDITOR` (first non-empty line is the title, the rest the description; empty cancels)                                    |
-| `o`                                  | Open the item's URL in the browser (alerts: the generator URL; pull requests: the pull request; tasks have none)                      |
-| `K`                                  | Show the item's details (tasks: title and description) in a popup; `j`/`k`, `ctrl+d`/`ctrl+u` and `g`/`G` scroll, `K`/`esc`/`q` close |
-| `L`                                  | Open the run log in `$EDITOR`                                                                                                         |
-| `R`                                  | Poll all sources now                                                                                                                  |
-| `q` / `ctrl+c`                       | Quit. Running agents keep running and move items still IN PROGRESS to WAITING when they exit                                          |
+| Key                                  | Action                                                                                                                                         |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `l` / `h`, `→` / `←`                 | Next / previous column                                                                                                                         |
+| `j` / `k`, `↓` / `↑`, `g` / `G`      | Move / first / last                                                                                                                            |
+| `ctrl+d` / `ctrl+u`, `PgDn` / `PgUp` | Move half the visible cards down / up                                                                                                          |
+| `p`                                  | Start an agent on a TO DO item (moves it to IN PROGRESS)                                                                                       |
+| `r`                                  | Resume an existing session of a TO DO, WAITING or DONE item, without changing its state                                                        |
+| `d`                                  | Move to DONE                                                                                                                                   |
+| `t`                                  | Move back to TO DO                                                                                                                             |
+| `n`                                  | New task in `$EDITOR` (first non-empty line is the title, the rest the description; empty cancels)                                             |
+| `o`                                  | Open the item's URL in the browser (alerts: the generator URL; pull requests: the pull request; Jira: the ticket, when known; tasks have none) |
+| `K`                                  | Show the item's details (tasks: title and description) in a popup; `j`/`k`, `ctrl+d`/`ctrl+u` and `g`/`G` scroll, `K`/`esc`/`q` close          |
+| `L`                                  | Open the run log in `$EDITOR`                                                                                                                  |
+| `R`                                  | Poll all sources now                                                                                                                           |
+| `q` / `ctrl+c`                       | Quit. Running agents keep running and move items still IN PROGRESS to WAITING when they exit                                                   |
 
 ## Install
 
@@ -114,7 +114,7 @@ providers:
     # The prompt which is passed to the agent when the item is moved to
     # IN PROGRESS. The following fields are available in the template context:
     # - `{{.ID}}`: the item's number
-    # - `{{.Kind}}`: the item kind (alert, pullrequest, task)
+    # - `{{.Kind}}`: the item kind (alert, pullrequest, jira, task)
     # - `{{.Source}}`: the source, e.g. the alert or pull request source name
     # - `{{.Title}}`: the one-line title
     # - `{{.Description}}`: the short description shown on the board
@@ -144,6 +144,43 @@ providers:
     prompt: |
       {{if eq .Source "review-requested"}}Review {{.URL}} using the `github-pr-review` skill.
       {{- else}}Address the review feedback on {{.URL}} using the `github-pr-review-reviews` skill.{{end}}
+
+      {{.Details}}
+
+  # Configuration for Jira tickets, which are polled using the Atlassian CLI
+  # (`acli`). Tower uses the Jira account and site `acli` is logged in to
+  # (`acli jira auth login`) and never handles Jira credentials itself.
+  #
+  # Every search fetches all pages of results (`--paginate`). Tickets whose
+  # status category is done (whatever the status is called, e.g. "Closed" or
+  # "Cancelled") are not shown: their cards move to DONE, also when the JQL
+  # still returns them, and completed tickets never create new cards. Tickets
+  # that no longer match a source's JQL move to DONE as well. A DONE ticket that
+  # matches again (and is not done) reopens its card in TO DO with its session
+  # as long as the card is retained. A ticket matched by two sources is two
+  # cards. A failed search changes nothing.
+  #
+  # Cards show `KEY · summary`, the status and assignee and the description;
+  # the details contain the key, source, status, type, priority, assignee,
+  # reporter, labels and the description (no comments, subtasks, links or
+  # timestamps, which acli's search does not provide). Jira Cloud descriptions (ADF) are rendered to Markdown by tower
+  # itself. The browser link (`o`) is derived from the site of the ticket's API
+  # URL; when acli only reports an API gateway URL, there is no link.
+  jira:
+    # Interval between polls.
+    poll_interval: 5m
+    # A list of Jira sources. Each source must have a unique name and a `jql`
+    # query, which is passed unchanged to `acli jira workitem search --jql`.
+    sources:
+      - name: assigned
+        jql: "assignee = currentUser() ORDER BY updated DESC"
+      - name: team
+        jql:
+          'project = DEMO AND labels = "needs-attention" ORDER BY priority DESC'
+    # The prompt which is passed to the agent when the item is moved to
+    # IN PROGRESS.
+    prompt: |
+      Work on the Jira ticket {{.Title}}.
 
       {{.Details}}
 
