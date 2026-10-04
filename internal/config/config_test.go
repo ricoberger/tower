@@ -15,6 +15,7 @@ app:
 agent:
   run_command: copilot --yolo --session-id={{.SessionID}} -p {{ .Prompt }} --dir=$HOME
   resume_command: ghostty-new --title={{.Title}} --command 'copilot --resume={{.SessionID}} --name={{shquote .Title}}'
+  working_dir: ~/agents
 providers:
   alerts:
     poll_interval: 1m

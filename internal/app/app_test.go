@@ -39,7 +39,7 @@ func setup(t *testing.T) (*App, *store.Store) {
 		t.Fatal(err)
 	}
 	providers := provider.Set{ap, mp}
-	r, err := agent.New(agent.Config{RunCommand: "true {{.Prompt}} {{.SessionID}}", ResumeCommand: "true {{.SessionID}}"}, dir, "tower", s, providers)
+	r, err := agent.New(agent.Config{RunCommand: "true {{.Prompt}} {{.SessionID}}", ResumeCommand: "true {{.SessionID}}", WorkingDir: dir}, dir, "tower", s, providers)
 	if err != nil {
 		t.Fatal(err)
 	}

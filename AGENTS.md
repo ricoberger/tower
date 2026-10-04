@@ -27,7 +27,7 @@ design — do not implement from them.
 | `internal/provider/alerts` | Alerts provider: config (`Config`, `$GRAFANA_INSTANCES`), Alertmanager client, alert → item conversion (details Markdown template in Go), prompt, `Poll` loop pushing `store.Update`s on a channel |
 | `internal/provider/pullrequests` | Pull requests provider: config and validation in `New`, `gh search prs` runner (injectable for tests, no shell, `--` before the query terms, `updated:>=` from `max_age`), pull request → item conversion, prompt, `Poll` loop |
 | `internal/provider/tasks` | Tasks provider (no polling): config, parses editor text into tasks, prompt |
-| `internal/agent` | Agent config (`Config`: `run_command`/`resume_command`), shell-like command splitting and Go-template commands (`shquote`). Starts agents via the detached `tower exec` wrapper (passes the title for the notification), the wrapper itself (`Exec`), resume, PID liveness |
+| `internal/agent` | Agent config (`Config`: `run_command`/`resume_command`/`working_dir`, both commands run in `working_dir`), shell-like command splitting and Go-template commands (`shquote`). Starts agents via the detached `tower exec` wrapper (passes the title for the notification), the wrapper itself (`Exec`), resume, PID liveness |
 | `internal/notify` | macOS notifications via osascript |
 | `internal/app` | Config (`retention`). Consumes source updates into the store (poll errors are logged), retention loop; implements `ui.Backend` |
 | `internal/ui` | Bubble Tea TUI: four kanban columns (one per state; cards with title, time in state and description) a details popup (`K`, composited with lipgloss layers) and a statusline with the keys; failed actions are logged |

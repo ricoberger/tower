@@ -16,6 +16,7 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/ricoberger/tower/internal/config/helpers"
 	"github.com/ricoberger/tower/internal/provider"
 	"github.com/ricoberger/tower/internal/store"
 )
@@ -28,11 +29,18 @@ type Config struct {
 	RunCommand string `yaml:"run_command"`
 	// ResumeCommand opens an existing session of a TO DO, WAITING or DONE item.
 	ResumeCommand string `yaml:"resume_command"`
+	// WorkingDir is the working directory of run_command and resume_command.
+	// A fixed directory lets agents that scope sessions to their working
+	// directory find them again, wherever tower was started. $VAR, ${VAR}, ~
+	// and a leading ~/ are expanded; it must be an existing directory.
+	WorkingDir string `yaml:"working_dir"`
 }
 
 // Agent starts agents for items, tracks their runs and resumes their sessions.
 type Agent struct {
 	stateDir string
+	// workDir is the resolved working directory of all agent commands.
+	workDir string
 	// exe is the tower binary that runs the hidden exec wrapper.
 	exe string
 	// run and resume are the parsed commands.
@@ -54,8 +62,19 @@ func New(cfg Config, stateDir, exe string, store *store.Store, providers provide
 		return nil, fmt.Errorf("parse resume_command: %w", err)
 	}
 
+	workDir, err := helpers.ExpandPath(cfg.WorkingDir)
+	if err != nil {
+		return nil, fmt.Errorf("working_dir: %w", err)
+	}
+	if fi, err := os.Stat(workDir); err != nil {
+		return nil, fmt.Errorf("working_dir: %w", err)
+	} else if !fi.IsDir() {
+		return nil, fmt.Errorf("working_dir: %s is not a directory", workDir)
+	}
+
 	return &Agent{
 		stateDir:  stateDir,
+		workDir:   workDir,
 		exe:       exe,
 		run:       run,
 		resume:    resume,
@@ -109,6 +128,8 @@ func (a *Agent) Start(ctx context.Context, it store.Item) error {
 	args := append([]string{"exec", "--state-dir", a.stateDir, "--item", strconv.FormatInt(it.ID, 10), "--session", sid, "--title", it.Title, "--"}, argv...)
 	// Not bound to ctx: the agent must outlive the TUI.
 	cmd := exec.CommandContext(context.Background(), a.exe, args...) // #nosec G204 -- tower itself with the configured run_command
+	// The wrapper's command inherits the directory.
+	cmd.Dir = a.workDir
 	cmd.Stdout, cmd.Stderr = logf, logf
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
@@ -137,6 +158,9 @@ func (a *Agent) Resume(ctx context.Context, it store.Item) error {
 	defer cancel()
 	var out bytes.Buffer
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) // #nosec G204 -- configured resume_command
+	// Without an explicit environment, Go also sets $PWD to Dir, which
+	// launchers such as ghostty-new use for the new terminal.
+	cmd.Dir = a.workDir
 	cmd.Stdout, cmd.Stderr = &out, &out
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	// A launcher may leave descendants holding its output pipes open.

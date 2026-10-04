@@ -3,7 +3,11 @@
 package helpers
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
@@ -25,4 +29,22 @@ func (d *Duration) UnmarshalYAML(n ast.Node) error {
 	}
 	d.Duration = v
 	return nil
+}
+
+// ExpandPath expands $VAR, ${VAR}, ~ and a leading ~/ in path and makes it
+// absolute. Relative paths are resolved against the current working
+// directory. An empty result is an error.
+func ExpandPath(path string) (string, error) {
+	path = os.ExpandEnv(path)
+	if path == "" {
+		return "", errors.New("must not be empty")
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, strings.TrimPrefix(path, "~"))
+	}
+	return filepath.Abs(path)
 }

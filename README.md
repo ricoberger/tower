@@ -129,6 +129,8 @@ agent:
   run_command: copilot --yolo --remote --session-id={{.SessionID}} -p {{.Prompt}}
   # Run when a TO DO, WAITING or DONE item with a session is resumed.
   resume_command: ghostty-new --placement=tab --title={{.Title}} --command 'copilot --yolo --remote --resume={{.SessionID}}'
+  # Working directory of run_command and resume_command. $VAR and ~/ expand.
+  working_dir: $HOME
 
 providers:
   alerts:
@@ -194,7 +196,13 @@ single quotes. A rendered value always stays one argument, whatever it contains:
 in `shquote` there, which quotes a value as one shell word, e.g.
 `--command 'copilot --resume={{.SessionID}} --name={{shquote .Title}}'`.
 
-`run_command` runs detached in the directory tower was started in, with stdin
+Both commands run in `working_dir`, independent of the directory tower was
+started in, so agents that scope sessions to their working directory always
+find them again. It is expanded like `state_dir` and must be an existing
+directory at startup. `$PWD` is set to it, which launchers such as
+`ghostty-new` use as the new terminal's directory.
+
+`run_command` runs detached in `working_dir`, with stdin
 from `/dev/null` and its output in `state_dir/runs/<item>.log`. There is no
 timeout and no concurrency limit. The wrapper records its PID before starting
 the command. At startup, tower marks abandoned starts with no claimed wrapper

@@ -3,16 +3,14 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/goccy/go-yaml"
 
 	"github.com/ricoberger/tower/internal/agent"
 	"github.com/ricoberger/tower/internal/app"
+	"github.com/ricoberger/tower/internal/config/helpers"
 	"github.com/ricoberger/tower/internal/provider/alerts"
 	"github.com/ricoberger/tower/internal/provider/pullrequests"
 	"github.com/ricoberger/tower/internal/provider/tasks"
@@ -47,20 +45,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse configuration file %s: %w", path, err)
 	}
 
-	cfg.StateDir = os.ExpandEnv(cfg.StateDir)
-	if cfg.StateDir == "" {
-		return nil, errors.New("state_dir must not be empty")
-	}
-	if cfg.StateDir == "~" || strings.HasPrefix(cfg.StateDir, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolve state_dir: %w", err)
-		}
-		cfg.StateDir = filepath.Join(home, strings.TrimPrefix(cfg.StateDir, "~"))
-	}
-	cfg.StateDir, err = filepath.Abs(cfg.StateDir)
+	cfg.StateDir, err = helpers.ExpandPath(cfg.StateDir)
 	if err != nil {
-		return nil, fmt.Errorf("resolve state_dir: %w", err)
+		return nil, fmt.Errorf("state_dir: %w", err)
 	}
 	return &cfg, nil
 }
