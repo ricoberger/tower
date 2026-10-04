@@ -49,6 +49,10 @@ func setup(t *testing.T, run, resume string) (*Agent, *store.Store, string) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	workDir := filepath.Join(t.TempDir(), "work dir")
+	if err := os.Mkdir(workDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("GRAFANA_INSTANCES", `{}`)
 	ac := alerts.Config{Prompt: "alert {{.Title}}"}
 	ac.PollInterval.Duration = time.Minute
@@ -65,7 +69,7 @@ func setup(t *testing.T, run, resume string) (*Agent, *store.Store, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	a, err := New(Config{RunCommand: run, ResumeCommand: resume}, dir, os.Args[0], s, provider.Set{ap, mp})
+	a, err := New(Config{RunCommand: run, ResumeCommand: resume, WorkingDir: workDir}, dir, os.Args[0], s, provider.Set{ap, mp})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +138,43 @@ func TestStartCommandNotFound(t *testing.T) {
 	log, _ := os.ReadFile(a.LogPath(it.ID))
 	if !got.Failed || !strings.Contains(string(log), "exit code 127") {
 		t.Fatalf("item = %+v, log = %s", got, log)
+	}
+}
+
+func TestCommandsRunInWorkingDir(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "out")
+	a, s, _ := setup(t, `sh -c 'printf "run %s %s\n" "$(pwd -P)" "$PWD" >> "$0"' `+shellQuote(out)+` {{.Prompt}} {{.SessionID}}`,
+		`sh -c 'printf "resume %s %s\n" "$(pwd -P)" "$PWD" >> "$0"' `+shellQuote(out)+` {{.SessionID}}`)
+	t.Chdir(t.TempDir())
+	it := createTask(t, s)
+	if err := a.Start(context.Background(), it); err != nil {
+		t.Fatal(err)
+	}
+	it = waitState(t, s, it.ID, store.StateWaiting)
+	if err := a.Resume(context.Background(), it); err != nil {
+		t.Fatal(err)
+	}
+	physical, err := filepath.EvalSymlinks(a.workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(out)
+	want := "run " + physical + " " + a.workDir + "\nresume " + physical + " " + a.workDir + "\n"
+	if string(data) != want {
+		t.Fatalf("output = %q, want %q", data, want)
+	}
+}
+
+func TestNewRejectsInvalidWorkingDir(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"", filepath.Join(t.TempDir(), "missing"), file} {
+		cfg := Config{RunCommand: "true {{.Prompt}} {{.SessionID}}", ResumeCommand: "true {{.SessionID}}", WorkingDir: dir}
+		if _, err := New(cfg, t.TempDir(), "tower", nil, nil); err == nil {
+			t.Errorf("working_dir %q accepted", dir)
+		}
 	}
 }
 
