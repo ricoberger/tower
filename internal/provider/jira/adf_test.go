@@ -59,6 +59,26 @@ func TestDescription(t *testing.T) {
 			want: "## Steps\n\n1. one\n2. two\n   - nested\n\n```sh\nkubectl get pods\nexit\n```\n\n> quoted\n>\n> more\n\n---\n\n_(attachment)_\n\nfallback",
 		},
 		{
+			name: "standalone block card",
+			raw:  `{"type": "doc", "content": [{"type": "blockCard", "attrs": {"url": "https://example.com/block"}}]}`,
+			want: "https://example.com/block",
+		},
+		{
+			name: "standalone embed card",
+			raw:  `{"type": "doc", "content": [{"type": "embedCard", "attrs": {"url": "https://example.com/embed", "layout": "center"}}]}`,
+			want: "https://example.com/embed",
+		},
+		{
+			name: "cards mixed with paragraphs",
+			raw: `{"type": "doc", "content": [
+				{"type": "paragraph", "content": [{"type": "text", "text": "before"}]},
+				{"type": "blockCard", "attrs": {"url": "https://example.com/block"}},
+				{"type": "embedCard", "attrs": {"url": "https://example.com/embed"}},
+				{"type": "paragraph", "content": [{"type": "text", "text": "after"}]}
+			]}`,
+			want: "before\n\nhttps://example.com/block\n\nhttps://example.com/embed\n\nafter",
+		},
+		{
 			name: "table",
 			raw: `{"type": "doc", "content": [{"type": "table", "content": [
 				{"type": "tableRow", "content": [
@@ -84,9 +104,10 @@ func TestDescription(t *testing.T) {
 
 func TestDetailsDescriptionFallbacks(t *testing.T) {
 	for raw, want := range map[string]string{
-		"":                     noDescription,
-		"null":                 noDescription,
-		`"text"`:               "text",
+		"":       noDescription,
+		"null":   noDescription,
+		`"text"`: "text",
+		`{"type": "doc", "content": [{"type": "blockCard", "attrs": {"url": "https://example.com/card"}}]}`: "https://example.com/card",
 		`{"type": "nonsense"}`: unrenderable,
 		`{"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "adf"}]}]}`: "adf",
 	} {

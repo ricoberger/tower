@@ -104,7 +104,7 @@ func block(n adfNode) string {
 		return table(n)
 	case "mediaSingle", "mediaGroup", "media":
 		return "_(attachment)_"
-	case "text", "hardBreak", "mention", "emoji", "inlineCard", "date", "status":
+	case "text", "hardBreak", "mention", "emoji", "inlineCard", "blockCard", "embedCard", "date", "status":
 		return inline([]adfNode{n})
 	default:
 		return blocks(n.Content)
