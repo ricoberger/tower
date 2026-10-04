@@ -27,7 +27,7 @@ design — do not implement from them.
 | `internal/provider` | `Provider` interface (one per item kind: `Kind`, `Poll`, `Prompt`), the shared prompt data (`PromptData`, `RenderPrompt`) and `Set`. Providers fill the stored item fields `title`, `description`, `details` (Markdown for the prompt) and `url`; everything else uses only these fields |
 | `internal/provider/alerts` | Alerts provider: config (`Config`, `$GRAFANA_INSTANCES`), Alertmanager client, alert → item conversion (details Markdown template in Go), prompt, `Poll` loop pushing `store.Update`s on a channel |
 | `internal/provider/pullrequests` | Pull requests provider: config and validation in `New`, `gh search prs` runner (injectable for tests, no shell, `--` before the query terms, `updated:>=` from `max_age`), pull request → item conversion, prompt, `Poll` loop |
-| `internal/provider/jira` | Jira provider: config and validation in `New`, `acli jira workitem search` runner (injectable for tests, no shell, JQL as one argument, `--paginate`), strict decoding of key/status category, issue → item conversion, built-in ADF → Markdown description renderer (`adf.go`), prompt, `Poll` loop |
+| `internal/provider/jira` | Jira provider: config and validation in `New`, `acli jira workitem search` runner (injectable for tests, no shell, JQL as one argument, `--paginate`), strict decoding of key/status category, issue → item conversion, browse URL from the site in acli's `jira_config.yaml`, built-in ADF → Markdown description renderer (`adf.go`), prompt, `Poll` loop |
 | `internal/provider/tasks` | Tasks provider (no polling): config, parses editor text into tasks, prompt |
 | `internal/agent` | Agent config (`Config`: `run_command`/`resume_command`/`working_dir`, both commands run in `working_dir`), shell-like command splitting and Go-template commands (`shquote`). Starts agents via the detached `tower exec` wrapper (passes the title for the notification), the wrapper itself (`Exec`), resume, PID liveness |
 | `internal/notify` | macOS notifications via osascript |
@@ -191,10 +191,14 @@ User-visible behavior that changes must stay consistent with these rules
   `KEY · summary`; description: `status · assignee` (`Unassigned` when
   absent) and the description. Plain-string descriptions are kept; ADF
   descriptions are rendered by the built-in renderer (no external converter),
-  unreadable ones become a placeholder. URL: `<site>/browse/<KEY>` derived
-  from the issue's `self` URL; empty for API-gateway (`api.atlassian.com`,
-  `/ex/jira/`) or missing `self` URLs. `acli` search rejects the `created`
-  and `updated` fields ("not allowed"), so they are not requested and new
+  unreadable ones become a placeholder. URL: `https://<site>/browse/<KEY>`
+  with the first `site:` value of `~/.config/acli/jira_config.yaml` (like the
+  user's `fzfjira` script: optional indentation and `- `, double quotes
+  removed), read on every poll (path injectable; tests never read the real
+  file); only the site is used and the file is never logged; the issue's
+  `self` URL is ignored. A missing/unreadable file or no plain-host site
+  leaves the URL empty without failing the poll. `acli` search rejects the
+  `created` and `updated` fields ("not allowed"), so they are not requested and new
   cards use the poll time; if `acli` reports them anyway, `created` (Jira
   `+0100` offsets and RFC3339) and both timestamps in the details are used.
 - Tasks: created with `n` in `$EDITOR`; the first non-empty line is the title,
@@ -222,7 +226,9 @@ User-visible behavior that changes must stay consistent with these rules
 - Use temp directories for state and config. Never touch the real
   `~/.config/tower`, Grafana, GitHub (`gh`), Copilot or desktop notifications
   (tests pass a fake `agent.Notifier` to `Exec` and a fake runner to the pull
-  requests provider).
+  requests provider). Jira tests never read the real `~/.config/acli`: their
+  `TestMain` points `$HOME` at a temp directory and tests set the provider's
+  site config path to temp files.
 - `internal/agent` tests use the test binary as the `tower exec` wrapper
   (see `TestMain`) and `sh -c` as the agent.
 - Store tests cover stale recovery observations across connections, atomic

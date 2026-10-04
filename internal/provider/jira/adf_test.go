@@ -111,7 +111,7 @@ func TestDetailsDescriptionFallbacks(t *testing.T) {
 		`{"type": "nonsense"}`: unrenderable,
 		`{"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "adf"}]}]}`: "adf",
 	} {
-		it := Item(assigned, Issue{Key: "DEMO-1", Status: "Open", StatusCategory: "new", Description: json.RawMessage(raw)})
+		it := Item(assigned, Issue{Key: "DEMO-1", Status: "Open", StatusCategory: "new", Description: json.RawMessage(raw)}, "")
 		if !strings.HasSuffix(it.Details, "## Description\n\n"+want+"\n") {
 			t.Errorf("description %q:\n%s", raw, it.Details)
 		}

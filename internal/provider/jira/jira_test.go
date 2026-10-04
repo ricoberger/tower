@@ -45,6 +45,22 @@ const results = `[
    "summary": "Won't fix", "status": {"name": "Cancelled", "statusCategory": {"key": "done", "name": "Done"}}}}
 ]`
 
+// site is the Jira site of the test links.
+const site = "example.atlassian.net"
+
+// TestMain points the home directory at an empty temporary directory, so no
+// test reads the real acli config.
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "tower-jira-home")
+	if err != nil {
+		panic(err)
+	}
+	_ = os.Setenv("HOME", home)
+	code := m.Run()
+	_ = os.RemoveAll(home)
+	os.Exit(code)
+}
+
 var assigned = SourceConfig{Name: "assigned", JQL: `assignee = currentUser() AND (labels = "a b" OR summary ~ "x") ORDER BY updated DESC`}
 
 func validConfig() Config {
@@ -196,14 +212,14 @@ func TestDecodeErrorOmitsOutput(t *testing.T) {
 func TestDecodeToleratesUnexpectedOptionalFields(t *testing.T) {
 	issues := decode(t, `[{"key": "DEMO-1", "fields": {"status": {"name": "Open", "statusCategory": {"key": "new"}},
 		"summary": 5, "labels": "x", "assignee": "nobody", "priority": [], "created": 1}}]`)
-	it := Item(assigned, issues[0])
+	it := Item(assigned, issues[0], "")
 	if it.Title != "DEMO-1" || it.Description != "Open · Unassigned" || !it.CreatedAt.IsZero() {
 		t.Errorf("item = %+v", it)
 	}
 }
 
 func TestItemsExcludeDoneCategory(t *testing.T) {
-	items := Items(assigned, decode(t, results))
+	items := Items(assigned, decode(t, results), site)
 	var keys []string
 	for _, it := range items {
 		keys = append(keys, it.Key)
@@ -215,14 +231,14 @@ func TestItemsExcludeDoneCategory(t *testing.T) {
 	if items == nil {
 		t.Error("successful empty snapshot must not be nil")
 	}
-	if got := Items(assigned, nil); got == nil || len(got) != 0 {
+	if got := Items(assigned, nil, site); got == nil || len(got) != 0 {
 		t.Errorf("no issues = %#v", got)
 	}
 }
 
 func TestItem(t *testing.T) {
 	issues := decode(t, results)
-	it := Item(assigned, issues[0])
+	it := Item(assigned, issues[0], site)
 	if it.Key != "jira:assigned:DEMO-42" {
 		t.Errorf("key = %q", it.Key)
 	}
@@ -265,7 +281,7 @@ func TestItem(t *testing.T) {
 }
 
 func TestItemMissingOptionalMetadata(t *testing.T) {
-	it := Item(SourceConfig{Name: "team", JQL: "project = DEMO"}, decode(t, results)[1])
+	it := Item(SourceConfig{Name: "team", JQL: "project = DEMO"}, decode(t, results)[1], "")
 	if it.Key != "jira:team:DEMO-7" || it.Title != "DEMO-7 · Plain" {
 		t.Errorf("key, title = %q, %q", it.Key, it.Title)
 	}
@@ -284,7 +300,7 @@ func TestItemMissingOptionalMetadata(t *testing.T) {
 		}
 	}
 
-	bare := Item(assigned, Issue{Key: "DEMO-9", StatusCategory: "new"})
+	bare := Item(assigned, Issue{Key: "DEMO-9", StatusCategory: "new"}, "")
 	if bare.Title != "DEMO-9" || bare.Description != "Unassigned" {
 		t.Errorf("bare = %+v", bare)
 	}
@@ -317,24 +333,93 @@ func TestParseTime(t *testing.T) {
 }
 
 func TestBrowseURL(t *testing.T) {
-	tests := []struct{ self, want string }{
-		{"https://example.atlassian.net/rest/api/3/issue/10001", "https://example.atlassian.net/browse/DEMO-42"},
-		{"https://example.atlassian.net/rest/api/2/issue/10001", "https://example.atlassian.net/browse/DEMO-42"},
-		{"https://jira.example.com/jira/rest/api/2/issue/10001", "https://jira.example.com/jira/browse/DEMO-42"},
-		{"https://api.atlassian.com/ex/jira/1324a495-1645-4b0d-a8b3-ed3a2f9e2b1f/rest/api/3/issue/10001", ""},
-		{"https://gateway.example.com/ex/jira/1324a495/rest/api/3/issue/10001", ""},
-		{"https://example.atlassian.net/rest/agile/1.0/issue/10001", ""},
-		{"https://example.atlassian.net/browse/DEMO-42", ""},
-		{"https://user:pass@example.atlassian.net/rest/api/3/issue/10001", ""},
-		{"file:///rest/api/3/issue/1", ""},
-		{"/rest/api/3/issue/1", ""},
+	tests := []struct{ site, want string }{
+		{"example.atlassian.net", "https://example.atlassian.net/browse/DEMO-42"},
+		{"jira.example.com:8443", "https://jira.example.com:8443/browse/DEMO-42"},
 		{"", ""},
-		{"::", ""},
+		{"https://example.atlassian.net", ""},
+		{"example.atlassian.net/jira", ""},
+		{"user@example.atlassian.net", ""},
+		{"example.atlassian.net?x", ""},
+		{"exa mple.atlassian.net", ""},
 	}
 	for _, tt := range tests {
-		if got := BrowseURL(tt.self, "DEMO-42"); got != tt.want {
-			t.Errorf("BrowseURL(%q) = %q, want %q", tt.self, got, tt.want)
+		if got := BrowseURL(tt.site, "DEMO-42"); got != tt.want {
+			t.Errorf("BrowseURL(%q) = %q, want %q", tt.site, got, tt.want)
 		}
+	}
+}
+
+func TestSite(t *testing.T) {
+	tests := []struct{ name, content, want string }{
+		{name: "plain", content: "site: example.atlassian.net\n", want: site},
+		{name: "quoted", content: `site: "example.atlassian.net"` + "\n", want: site},
+		{name: "list item", content: "profiles:\n- site: example.atlassian.net\n", want: site},
+		{name: "indented quoted list item", content: "current_profile: \"a\"\nprofiles:\n    -   site:   \"example.atlassian.net\"  \r\n      email: a@example.com\n", want: site},
+		{name: "indented", content: "profiles:\n  default:\n    site: example.atlassian.net\n", want: site},
+		{name: "first wins", content: "- site: example.atlassian.net\n- site: other.atlassian.net\n", want: site},
+		{name: "other keys ignored", content: "jira_site: other.atlassian.net\nsites: other\n# site: other\nsite: example.atlassian.net\n", want: site},
+		{name: "no site", content: "current_profile: a\n"},
+		{name: "empty file"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "jira_config.yaml")
+			if err := os.WriteFile(path, []byte(tt.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := Site(path); got != tt.want {
+				t.Errorf("Site = %q, want %q", got, tt.want)
+			}
+		})
+	}
+	if got := Site(filepath.Join(t.TempDir(), "missing.yaml")); got != "" {
+		t.Errorf("missing file = %q", got)
+	}
+	if got := Site(t.TempDir()); got != "" {
+		t.Errorf("directory = %q", got)
+	}
+	if got := Site(""); got != "" {
+		t.Errorf("no path = %q", got)
+	}
+}
+
+func TestUpdateURLFromSiteConfig(t *testing.T) {
+	dir := t.TempDir()
+	tests := []struct {
+		name, content string
+		create        bool
+		want          string
+	}{
+		{name: "site", content: "- site: \"example.atlassian.net\"\n", create: true, want: "https://example.atlassian.net/browse/DEMO-7"},
+		{name: "no site", content: "current_profile: a\n", create: true},
+		{name: "missing file"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := New(validConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			p.siteConfig = filepath.Join(dir, tt.name+".yaml")
+			if tt.create {
+				if err := os.WriteFile(p.siteConfig, []byte(tt.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// The self URL points at a different host: the link comes from
+			// the acli site only.
+			p.run = func(context.Context, []string) ([]byte, error) {
+				return []byte(`[{"key": "DEMO-7", "self": "https://other.example.com/rest/api/3/issue/1", "fields": {"status": {"statusCategory": {"key": "new"}}}}]`), nil
+			}
+			u := p.update(context.Background(), assigned)
+			if u.Err != nil || len(u.Items) != 1 {
+				t.Fatalf("update = %+v", u)
+			}
+			if u.Items[0].URL != tt.want {
+				t.Errorf("url = %q, want %q", u.Items[0].URL, tt.want)
+			}
+		})
 	}
 }
 
