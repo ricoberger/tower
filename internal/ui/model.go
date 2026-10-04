@@ -48,6 +48,7 @@ type Model struct {
 	// closed; detailsScroll is the popup's first line.
 	details       int64
 	detailsScroll int
+	detailsCache  detailsCache
 	log           *slog.Logger
 	now           func() time.Time
 }
@@ -235,7 +236,7 @@ func (m *Model) halfPage() int {
 
 // handleDetailsKey handles the keys while the details popup is open.
 func (m *Model) handleDetailsKey(key string) (tea.Model, tea.Cmd) {
-	page := max(m.detailsHeight()-2, 1)
+	page := max(m.detailsRows(), 1)
 	switch key {
 	case "ctrl+c":
 		return m, tea.Quit

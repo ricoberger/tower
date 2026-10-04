@@ -6,6 +6,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/glamour/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
@@ -85,7 +86,30 @@ func (m *Model) detailsHeight() int {
 	return max(min(m.height-10, 180), 3)
 }
 
-// detailsLines returns the wrapped content of the details popup: the item's
+// detailsPadding is the number of empty rows above and below the content of
+// the details popup. Small popups drop it rather than hide the content.
+func (m *Model) detailsPadding() int {
+	if m.detailsHeight()-2 >= 5 {
+		return 1
+	}
+	return 0
+}
+
+// detailsRows is the number of content rows shown in the details popup.
+func (m *Model) detailsRows() int {
+	return m.detailsHeight() - 2 - 2*m.detailsPadding()
+}
+
+// detailsCache holds the rendered content of the details popup. Rendering
+// Markdown is too slow to repeat on every frame and key press.
+type detailsCache struct {
+	id    int64
+	text  string
+	width int
+	lines []string
+}
+
+// detailsLines returns the rendered content of the details popup: the item's
 // details, or its title and description when it has none.
 func (m *Model) detailsLines() []string {
 	it, ok := m.detailsItem()
@@ -96,7 +120,41 @@ func (m *Model) detailsLines() []string {
 	if strings.TrimSpace(text) == "" {
 		text = "# " + it.Title + "\n\n" + it.Description
 	}
-	return strings.Split(ansi.Wrap(strings.TrimSpace(text), m.detailsWidth()-4, ""), "\n")
+	width := m.detailsWidth() - 4
+	c := &m.detailsCache
+	if c.lines == nil || c.id != it.ID || c.text != text || c.width != width {
+		*c = detailsCache{id: it.ID, text: text, width: width, lines: m.renderMarkdown(text, width)}
+	}
+	return c.lines
+}
+
+// renderMarkdown renders text with glamour, using the style from
+// $GLAMOUR_STYLE (a built-in style name or a JSON file) like other glamour
+// tools. It falls back to the plain, wrapped text so a broken style cannot
+// hide the details.
+func (m *Model) renderMarkdown(text string, width int) []string {
+	out, err := func() (string, error) {
+		r, err := glamour.NewTermRenderer(glamour.WithEnvironmentConfig(), glamour.WithWordWrap(width))
+		if err != nil {
+			return "", err
+		}
+		return r.Render(text)
+	}()
+	if err != nil {
+		m.log.Warn("render details", "err", err)
+		out = ansi.Wrap(strings.TrimSpace(text), width, "")
+	}
+	lines := strings.Split(out, "\n")
+	// Glamour surrounds documents with empty lines; the popup has its own
+	// border.
+	blank := func(l string) bool { return strings.TrimSpace(ansi.Strip(l)) == "" }
+	for len(lines) > 1 && blank(lines[0]) {
+		lines = lines[1:]
+	}
+	for len(lines) > 1 && blank(lines[len(lines)-1]) {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 // renderDetails renders the details popup of the selected item; ok is false
@@ -107,13 +165,15 @@ func (m *Model) renderDetails() (string, bool) {
 		return "", false
 	}
 	lines := m.detailsLines()
-	rows := m.detailsHeight() - 2
+	rows := m.detailsRows()
 	m.detailsScroll = max(min(m.detailsScroll, len(lines)-rows), 0)
 	title := it.Title
 	if len(lines) > rows {
 		title += fmt.Sprintf(" (%d%%)", 100*(m.detailsScroll+rows)/len(lines))
 	}
-	return strings.TrimSuffix(box(title, lines[m.detailsScroll:], m.detailsWidth(), m.detailsHeight(), true), "\n"), true
+	pad := make([]string, m.detailsPadding())
+	content := append(pad, lines[m.detailsScroll:min(m.detailsScroll+rows, len(lines))]...)
+	return strings.TrimSuffix(box(title, content, m.detailsWidth(), m.detailsHeight(), true), "\n"), true
 }
 
 // renderColumn renders the cards of a state. Cards are separated by an empty

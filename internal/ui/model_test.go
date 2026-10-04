@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -20,6 +21,15 @@ import (
 	"github.com/ricoberger/tower/internal/provider/tasks"
 	"github.com/ricoberger/tower/internal/store"
 )
+
+// TestMain fixes the Markdown style of the details popup, so the user's
+// $GLAMOUR_STYLE does not change the rendered output.
+func TestMain(m *testing.M) {
+	if err := os.Setenv("GLAMOUR_STYLE", "notty"); err != nil {
+		panic(err)
+	}
+	os.Exit(m.Run())
+}
 
 type fakeBackend struct {
 	items   []store.Item
@@ -209,7 +219,7 @@ func TestDetails(t *testing.T) {
 	for i := range 60 {
 		details = append(details, fmt.Sprintf("line %d", i))
 	}
-	f.items[0].Details = "# Older\n" + strings.Join(details, "\n")
+	f.items[0].Details = "# Older\n\n" + strings.Join(details, "\n\n")
 	m.Update(itemsMsg{items: f.items})
 
 	press(m, "K")
