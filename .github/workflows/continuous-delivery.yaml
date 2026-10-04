@@ -1,0 +1,54 @@
+---
+name: Continuous Delivery
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions: read-all
+
+jobs:
+  binaries:
+    name: Binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      matrix:
+        platform:
+          [
+            { os: "darwin", arch: "amd64" },
+            { os: "darwin", arch: "arm64" },
+            { os: "linux", arch: "amd64" },
+            { os: "linux", arch: "arm64" },
+          ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Install Dependencies
+        run: |
+          go mod download
+
+      - name: Build
+        run: |
+          GOOS="${{ matrix.platform.os }}" GOARCH="${{ matrix.platform.arch }}" go build -o ./bin/tower .
+
+          cd ./bin
+          tar -czf tower-${{ matrix.platform.os }}-${{ matrix.platform.arch }}.tar.gz tower
+
+      - name: Upload Artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.ref_name }} ./bin/tower-${{ matrix.platform.os }}-${{ matrix.platform.arch }}.tar.gz --clobber
