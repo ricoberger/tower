@@ -14,6 +14,7 @@ import (
 	"github.com/ricoberger/tower/internal/agent"
 	"github.com/ricoberger/tower/internal/app"
 	"github.com/ricoberger/tower/internal/provider/alerts"
+	"github.com/ricoberger/tower/internal/provider/pullrequests"
 	"github.com/ricoberger/tower/internal/provider/tasks"
 )
 
@@ -26,8 +27,9 @@ type Config struct {
 	Agent    agent.Config `yaml:"agent"`
 	// Providers holds the settings of the item providers.
 	Providers struct {
-		Alerts alerts.Config `yaml:"alerts"`
-		Tasks  tasks.Config  `yaml:"tasks"`
+		Alerts       alerts.Config       `yaml:"alerts"`
+		PullRequests pullrequests.Config `yaml:"pullrequests"`
+		Tasks        tasks.Config        `yaml:"tasks"`
 	} `yaml:"providers"`
 }
 

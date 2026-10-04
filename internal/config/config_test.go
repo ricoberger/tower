@@ -27,6 +27,13 @@ providers:
           - team="infra"
         receiver: ""
     prompt: "Investigate {{.Title}} from {{.Source}}"
+  pullrequests:
+    poll_interval: 5m
+    max_age: 336h
+    sources:
+      - name: review-requested
+        query: is:open review-requested:@me -author:app/dependabot
+    prompt: "Review {{.URL}}"
   tasks:
     prompt: "{{.Title}}: {{.Description}}"
 `
@@ -57,6 +64,9 @@ func TestLoad(t *testing.T) {
 	}
 	if s := cfg.Providers.Alerts.Sources[0]; s.Name != "dev-de1" || s.GrafanaInstance != "dev" || s.Filter[0] != `team="infra"` {
 		t.Errorf("source = %+v", s)
+	}
+	if pr := cfg.Providers.PullRequests; pr.MaxAge.Duration != 336*time.Hour || pr.Sources[0].Query != "is:open review-requested:@me -author:app/dependabot" {
+		t.Errorf("pullrequests = %+v", pr)
 	}
 }
 

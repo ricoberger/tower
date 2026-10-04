@@ -1,7 +1,7 @@
 # tower
 
-A personal work board for the terminal. Work items — alerts today, pull
-requests, Jira tickets and more later — land in **TO DO**. You hand an item to
+A personal work board for the terminal. Work items — alerts, GitHub pull
+requests and tasks today, Jira tickets and more later — land in **TO DO**. You hand an item to
 an agent (GitHub Copilot CLI) with one key. When the agent exits, an item
 still **IN PROGRESS** moves to **WAITING** so you can resume its session.
 Items end in **DONE** when the source resolves them or when you close them.
@@ -25,7 +25,8 @@ p progress · r resume · d done · t todo · n new · o open · K details · L 
 Each column is a state. A card shows the item's title with the time since it
 entered its state (yellow in IN PROGRESS, red for failed runs in WAITING,
 green for resolved alerts manually moved back to TO DO) and up to three lines
-of its description (see "Alert sources" for alerts, the description for tasks).
+of its description (see "Alert sources" and "Pull request sources", the
+description for tasks).
 
 The statusline shows the keys. Failed polls and agent/task actions are written
 to `state_dir/tower.log`; keys that don't apply to the selected item (e.g. `p`
@@ -35,7 +36,7 @@ outside TO DO) do nothing.
 
 | State | How items get there |
 | --- | --- |
-| TO DO | New items from a source, tasks (`n`), `t` on any item, or an alert that fires again within `reopen_window` after it resolved |
+| TO DO | New items from a source, tasks (`n`), `t` on any item, an alert that fires again within `reopen_window` after it resolved, or a retained pull request that matches its query again |
 | IN PROGRESS | Only manually: `p` on a TO DO item starts `run_command` in the background |
 | WAITING | When the agent command exits while the item is still IN PROGRESS; failed on a non-zero exit, a dead wrapper, or an abandoned start recovered at startup |
 | DONE | The source resolved the item (also while an agent is running; the agent is not stopped), or `d` |
@@ -58,7 +59,7 @@ reopened.
 | `d` | Move to DONE |
 | `t` | Move back to TO DO |
 | `n` | New task in `$EDITOR` (first non-empty line is the title, the rest the description; empty cancels) |
-| `o` | Open the item's URL in the browser (alerts: the generator URL; tasks have none) |
+| `o` | Open the item's URL in the browser (alerts: the generator URL; pull requests: the pull request; tasks have none) |
 | `K` | Show the item's details (tasks: title and description) in a popup; `j`/`k`, `ctrl+d`/`ctrl+u` and `g`/`G` scroll, `K`/`esc`/`q` close |
 | `L` | Open the run log in `$EDITOR` |
 | `R` | Poll all sources now |
@@ -70,6 +71,7 @@ Requires Go 1.27.1 or newer to build, and macOS for browser opening (`open`)
 and desktop notifications (`osascript`). The example configuration also needs
 an authenticated Copilot CLI, its SRE skills, and Ghostty with the external
 `ghostty-new` helper; that helper is not included in this repository.
+Pull request sources need the [`gh`](https://cli.github.com) CLI, logged in.
 
 ```sh
 go install .                  # from the repository root
@@ -145,6 +147,22 @@ providers:
       Investigate the alert {{.Title}} using the `sre-analyze-alert` skill ...
       {{.Details}}
 
+  pullrequests:
+    poll_interval: 5m
+    # Only pull requests updated within this duration are shown.
+    max_age: 336h
+    sources:
+      - name: authored                 # must be nonempty and unique
+        query: is:open author:@me      # gh search prs terms
+      - name: review-requested
+        query: is:open review-requested:@me -author:app/dependabot
+    # One prompt for all sources; branch on the source name.
+    prompt: |
+      {{if eq .Source "review-requested"}}Review {{.URL}} using the `github-pr-review` skill.
+      {{- else}}Address the review feedback on {{.URL}} using the `github-pr-review-reviews` skill.{{end}}
+
+      {{.Details}}
+
   tasks:
     prompt: |
       Task: {{.Title}}
@@ -218,6 +236,43 @@ Grafana instance, URL and Alertmanager datasource of the source, severity,
 state, start time, receivers, generator URL, summary, description, labels and
 the other annotations.
 
+### Pull request sources
+
+Each source is a GitHub pull request search run with the
+[`gh`](https://cli.github.com) CLI and its existing login; tower handles no
+tokens. `gh` is only needed when sources are configured. Without sources the
+other `pullrequests` options may be omitted; with sources `poll_interval`,
+`max_age` and `prompt` are required and source names must be nonempty and
+unique. A missing `gh`, an expired login or an invalid query is a failed poll,
+written to `tower.log`.
+
+Every poll runs, without a shell and with a 30-second timeout:
+
+```sh
+gh search prs --json … --limit 1000 -- <query terms> updated:>=<today − max_age>
+```
+
+The query is split at whitespace; quotes are not supported, so qualifiers with
+spaces (`label:"needs review"`) don't work. Because the terms follow `--`,
+exclusions work: `-author:app/dependabot` hides Dependabot (GitHub apps are
+matched as `app/<name>`, not by their `dependabot[bot]` login). `updated:` is
+day-granular (UTC). A search that reaches 1000 results is treated as a failed
+poll, because the truncated snapshot would close the missing pull requests;
+narrow the query or `max_age`. Mind GitHub's search rate limit (30 requests
+per minute) when choosing the number of sources and `poll_interval`.
+
+Items are per source: a pull request matched by two queries shows up as two
+cards, one per role. Titles are `owner/repo#number · title`. The description
+is `@author` (plus `· draft`) followed by the pull request body. The URL is the
+pull request, and the details contain the repository, number, URL, author,
+source and query, state, creation and update times and the body. Branches and
+review state are not included; the skills fetch them.
+
+Pull requests that are merged, closed or not updated within `max_age` move to
+DONE. A pull request that matches again goes back to TO DO with its session
+as long as its item is retained (there is no `reopen_window`); after
+`retention` deleted it, it becomes a new item.
+
 ### Prompts
 
 Prompts are Go templates (`text/template`); unknown fields are errors. Every
@@ -226,18 +281,18 @@ provider's prompt (`providers.<kind>.prompt`) gets the same fields:
 | Field | Value |
 | --- | --- |
 | `{{.ID}}` | The item's number |
-| `{{.Kind}}` | The item kind (`alert`, `task`) |
-| `{{.Source}}` | The source, e.g. the alert source name |
+| `{{.Kind}}` | The item kind (`alert`, `pullrequest`, `task`) |
+| `{{.Source}}` | The source, e.g. the alert or pull request source name |
 | `{{.Title}}` | The one-line title |
 | `{{.Description}}` | The short description shown on the board |
 | `{{.Details}}` | The item as Markdown (empty for tasks) |
 | `{{.URL}}` | The item's link (empty for tasks) |
 
-Providers store these fields with the item. Current polled items (alerts)
-update them on every poll while they are reported, including items manually
-closed while still firing. Field-only updates preserve the state, session,
-time in state and retention timestamp; historical episodes replaced by a new
-item remain unchanged.
+Providers store these fields with the item. Current polled items (alerts,
+pull requests) update them on every poll while they are reported, including
+items manually closed while still reported. Field-only updates preserve the
+state, session, time in state and retention timestamp; historical episodes
+replaced by a new item remain unchanged.
 
 ## Development
 

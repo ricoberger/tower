@@ -5,7 +5,8 @@ Guidance for AI coding agents working on `tower`.
 ## What tower is
 
 A personal kanban board in the terminal for an SRE. Sources (today:
-Grafana-managed Alertmanagers, plus tasks) push items into **TO DO**.
+Grafana-managed Alertmanagers and GitHub pull request searches, plus tasks)
+push items into **TO DO**.
 The user starts an agent (Copilot CLI) on an item, which moves it to **IN
 PROGRESS**; when the agent exits an item still in that state moves to
 **WAITING**. Existing sessions can be resumed from TO DO, WAITING or DONE
@@ -24,6 +25,7 @@ design — do not implement from them.
 | `internal/store` | SQLite item store (`items` table), atomic completion and conditional recovery, `Sync` rules for source snapshots, retention, `flock` lock; `Get` is retained as the single-item lookup API, also used by integration tests |
 | `internal/provider` | `Provider` interface (one per item kind: `Kind`, `Poll`, `Prompt`), the shared prompt data (`PromptData`, `RenderPrompt`) and `Set`. Providers fill the stored item fields `title`, `description`, `details` (Markdown for the prompt) and `url`; everything else uses only these fields |
 | `internal/provider/alerts` | Alerts provider: config (`Config`, `$GRAFANA_INSTANCES`), Alertmanager client, alert → item conversion (details Markdown template in Go), prompt, `Poll` loop pushing `store.Update`s on a channel |
+| `internal/provider/pullrequests` | Pull requests provider: config and validation in `New`, `gh search prs` runner (injectable for tests, no shell, `--` before the query terms, `updated:>=` from `max_age`), pull request → item conversion, prompt, `Poll` loop |
 | `internal/provider/tasks` | Tasks provider (no polling): config, parses editor text into tasks, prompt |
 | `internal/agent` | Agent config (`Config`: `run_command`/`resume_command`), shell-like command splitting and Go-template commands (`shquote`). Starts agents via the detached `tower exec` wrapper (passes the title for the notification), the wrapper itself (`Exec`), resume, PID liveness |
 | `internal/notify` | macOS notifications via osascript |
@@ -72,7 +74,8 @@ targeted tests with `-race`, e.g. `go test -race -run TestSync ./internal/store`
   claim a recovered session. Periodic liveness checks skip PID 0 because a
   new start may still be in flight.
 - **Item keys are globally unique and built by the source**
-  (`alert:<source>:<fingerprint>`, `task:<uuid>`). `Sync` matches items by
+  (`alert:<source>:<fingerprint>`,
+  `pullrequest:<source>:<owner>/<repo>#<number>`, `task:<uuid>`). `Sync` matches items by
   `key`; `kind` + `source` of the `store.Update` scope which items a snapshot
   can resolve.
 - **Agents outlive the TUI.** `run_command` runs under `tower exec` in its own
@@ -90,6 +93,9 @@ targeted tests with `-race`, e.g. `go test -race -run TestSync ./internal/store`
 - The SQLite database is written concurrently by the TUI and by `tower exec`
   processes (WAL, busy timeout). Keep transactions short; use conditional
   `UPDATE … WHERE state = ? AND session_id = ?` instead of read-modify-write.
+- Pull request snapshots must be complete: a search reaching the 1000-result
+  limit fails the poll instead of resolving the cut-off items. Pull requests
+  use an unlimited reopen window, so retention alone bounds reopening.
 - Providers emit one-line titles (collapsed whitespace); the UI also
   normalizes loaded titles for old records and future providers. Raw alert
   details remain unchanged.
@@ -103,8 +109,9 @@ targeted tests with `-race`, e.g. `go test -race -run TestSync ./internal/store`
 ## Testing conventions
 
 - Use temp directories for state and config. Never touch the real
-  `~/.config/tower`, Grafana, Copilot or desktop notifications
-  (tests pass a fake `agent.Notifier` to `Exec`).
+  `~/.config/tower`, Grafana, GitHub (`gh`), Copilot or desktop notifications
+  (tests pass a fake `agent.Notifier` to `Exec` and a fake runner to the pull
+  requests provider).
 - `internal/agent` tests use the test binary as the `tower exec` wrapper
   (see `TestMain`) and `sh -c` as the agent.
 - Store tests cover stale recovery observations across connections, atomic
