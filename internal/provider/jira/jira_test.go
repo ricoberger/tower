@@ -122,12 +122,13 @@ func TestArgsPassJQLUnchangedAndPaginate(t *testing.T) {
 	if slices.Contains(got, "--limit") {
 		t.Error("search is limited")
 	}
-	for _, f := range []string{"key", "summary", "status", "issuetype", "priority", "assignee", "reporter", "labels", "created", "updated", "description"} {
+	for _, f := range []string{"key", "summary", "status", "issuetype", "priority", "assignee", "reporter", "labels", "description"} {
 		if !slices.Contains(strings.Split(searchFields, ","), f) {
 			t.Errorf("field %s not requested", f)
 		}
 	}
-	for _, f := range []string{"comment", "subtasks", "issuelinks"} {
+	// acli search rejects created and updated, failing every poll.
+	for _, f := range []string{"comment", "subtasks", "issuelinks", "created", "updated"} {
 		if slices.Contains(strings.Split(searchFields, ","), f) {
 			t.Errorf("field %s requested", f)
 		}

@@ -193,8 +193,10 @@ User-visible behavior that changes must stay consistent with these rules
   descriptions are rendered by the built-in renderer (no external converter),
   unreadable ones become a placeholder. URL: `<site>/browse/<KEY>` derived
   from the issue's `self` URL; empty for API-gateway (`api.atlassian.com`,
-  `/ex/jira/`) or missing `self` URLs. Created time comes from `created`
-  (Jira `+0100` offsets and RFC3339).
+  `/ex/jira/`) or missing `self` URLs. `acli` search rejects the `created`
+  and `updated` fields ("not allowed"), so they are not requested and new
+  cards use the poll time; if `acli` reports them anyway, `created` (Jira
+  `+0100` offsets and RFC3339) and both timestamps in the details are used.
 - Tasks: created with `n` in `$EDITOR`; the first non-empty line is the title,
   the rest the description; empty input cancels.
 

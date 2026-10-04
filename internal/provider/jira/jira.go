@@ -26,8 +26,11 @@ import (
 const Kind = "jira"
 
 // searchFields are the Jira fields requested from acli. The search's default
-// display fields lack the description and timestamps.
-const searchFields = "key,summary,status,issuetype,priority,assignee,reporter,labels,created,updated,description"
+// display fields lack the description, reporter and labels. acli search
+// rejects created and updated ("fields 'created, updated' are not allowed"),
+// so the timestamps are only used when acli reports them anyway; otherwise
+// the item's creation time is the poll time.
+const searchFields = "key,summary,status,issuetype,priority,assignee,reporter,labels,description"
 
 // doneCategory is the status category key of completed tickets. Workflow
 // status names ("Closed", "Cancelled", …) and category colors are

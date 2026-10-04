@@ -162,8 +162,8 @@ providers:
   #
   # Cards show `KEY · summary`, the status and assignee and the description;
   # the details contain the key, source, status, type, priority, assignee,
-  # reporter, labels, timestamps and the description (no comments, subtasks or
-  # links). Jira Cloud descriptions (ADF) are rendered to Markdown by tower
+  # reporter, labels and the description (no comments, subtasks, links or
+  # timestamps, which acli's search does not provide). Jira Cloud descriptions (ADF) are rendered to Markdown by tower
   # itself. The browser link (`o`) is derived from the site of the ticket's API
   # URL; when acli only reports an API gateway URL, there is no link.
   jira:
