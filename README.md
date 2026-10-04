@@ -23,10 +23,8 @@ p progress · r resume · d done · t todo · n new · o open · K details · L 
 ```
 
 Each column is a state. A card shows the item's title with the time since it
-entered its state (yellow in IN PROGRESS, red for failed runs in WAITING,
-green for resolved alerts manually moved back to TO DO) and up to three lines
-of its description (see "Alert sources" and "Pull request sources", the
-description for tasks).
+entered its state and up to three lines of its description (see "Alert
+sources" and "Pull request sources", the description for tasks).
 
 The statusline shows the keys. Failed polls and agent/task actions are written
 to `state_dir/tower.log`; keys that don't apply to the selected item (e.g. `p`

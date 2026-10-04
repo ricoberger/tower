@@ -16,9 +16,6 @@ var (
 	accent = lipgloss.Color("#c6a0f6")
 	faint  = lipgloss.NewStyle().Faint(true)
 	bold   = lipgloss.NewStyle().Bold(true)
-	red    = lipgloss.NewStyle().Foreground(lipgloss.Red)
-	yellow = lipgloss.NewStyle().Foreground(lipgloss.Yellow)
-	green  = lipgloss.NewStyle().Foreground(lipgloss.Green)
 	gray   = lipgloss.NewStyle().Foreground(lipgloss.BrightBlack)
 )
 
@@ -177,7 +174,7 @@ func (m *Model) renderCard(it store.Item, width int, selected bool) []string {
 		marker = lipgloss.NewStyle().Foreground(accent).Render("▌ ")
 	}
 	w := max(width-2, 1)
-	age := m.age(it)
+	age := faint.Render(ago(m.now().Sub(it.UpdatedAt)))
 	titleW := max(w-ansi.StringWidth(age)-1, 1)
 	title := ansi.Truncate(it.Title, titleW, "…")
 	if selected {
@@ -188,21 +185,6 @@ func (m *Model) renderCard(it store.Item, width int, selected bool) []string {
 		lines = append(lines, marker+faint.Render(l))
 	}
 	return lines
-}
-
-// age is the time since the item entered its state. It is red for failed
-// agents and green for resolved alerts that are still to do.
-func (m *Model) age(it store.Item) string {
-	text := ago(m.now().Sub(it.UpdatedAt))
-	switch {
-	case it.State == store.StateWaiting && it.Failed:
-		return red.Render(text)
-	case it.State == store.StateTodo && it.ResolvedAt != nil:
-		return green.Render(text)
-	case it.State == store.StateInProgress:
-		return yellow.Render(text)
-	}
-	return faint.Render(text)
 }
 
 // wrap word-wraps s to width and returns at most n non-empty lines; the last
