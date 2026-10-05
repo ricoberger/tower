@@ -20,7 +20,6 @@ import (
 	"github.com/ricoberger/tower/internal/agent"
 	"github.com/ricoberger/tower/internal/app"
 	"github.com/ricoberger/tower/internal/config"
-	"github.com/ricoberger/tower/internal/notify"
 	"github.com/ricoberger/tower/internal/provider"
 	"github.com/ricoberger/tower/internal/provider/alerts"
 	"github.com/ricoberger/tower/internal/provider/jira"
@@ -123,7 +122,6 @@ type ExecCmd struct {
 	StateDir string   `required:"" type:"path" help:"State directory."`
 	Item     int64    `required:"" help:"Item id."`
 	Session  string   `required:"" help:"Session id."`
-	Title    string   `help:"Item title."`
 	Command  []string `arg:"" help:"Command and arguments."`
 }
 
@@ -133,7 +131,7 @@ func (c *ExecCmd) Run() error {
 		return err
 	}
 
-	code := agent.Exec(notify.New(), store, c.Item, c.Session, c.Title, c.Command)
+	code := agent.Exec(store, c.Item, c.Session, c.Command)
 	store.Close()
 
 	// Keep the command's exit code; FatalIfErrorf would always exit 1.

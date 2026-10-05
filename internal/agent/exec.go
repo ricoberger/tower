@@ -13,17 +13,13 @@ import (
 	"github.com/ricoberger/tower/internal/store"
 )
 
-// Notifier shows a notification when an agent finished.
-type Notifier interface {
-	Send(title, subtitle, message string) error
-}
-
 // Exec is the hidden `tower exec` wrapper: it claims the session, runs argv,
 // records failure status, and moves the item to WAITING if it is still IN
-// PROGRESS in this session. A transition to WAITING notifies the user with
-// title as subtitle. Output and the exit code go to the run log. Exec returns
-// the command's exit code, or 127 if the session could not be claimed.
-func Exec(notify Notifier, store *store.Store, id int64, sessionID, title string, argv []string) int {
+// PROGRESS in this session. The TUI notifies the user about the transition,
+// because only it writes to a terminal. Output and the exit code go to the
+// run log. Exec returns the command's exit code, or 127 if the session could
+// not be claimed.
+func Exec(store *store.Store, id int64, sessionID string, argv []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	err := store.SetPID(ctx, id, sessionID, os.Getpid())
 	cancel()
@@ -37,20 +33,8 @@ func Exec(notify Notifier, store *store.Store, id int64, sessionID, title string
 
 	ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	moved, err := store.Finish(ctx, id, sessionID, code != 0, time.Now())
-	if err != nil {
+	if _, err := store.Finish(ctx, id, sessionID, code != 0, time.Now()); err != nil {
 		fmt.Fprintf(os.Stderr, "tower exec: %v\n", err)
-		return code
-	}
-	if !moved {
-		return code
-	}
-	heading := "tower: agent finished"
-	if code != 0 {
-		heading = fmt.Sprintf("tower: agent failed (exit %d)", code)
-	}
-	if err := notify.Send(heading, title, "Waiting for you"); err != nil {
-		fmt.Fprintf(os.Stderr, "tower exec: notification: %v\n", err)
 	}
 	return code
 }

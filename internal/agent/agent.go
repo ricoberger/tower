@@ -125,7 +125,7 @@ func (a *Agent) Start(ctx context.Context, it store.Item) error {
 	if err := a.store.Start(ctx, it.ID, sid, time.Now()); err != nil {
 		return err
 	}
-	args := append([]string{"exec", "--state-dir", a.stateDir, "--item", strconv.FormatInt(it.ID, 10), "--session", sid, "--title", it.Title, "--"}, argv...)
+	args := append([]string{"exec", "--state-dir", a.stateDir, "--item", strconv.FormatInt(it.ID, 10), "--session", sid, "--"}, argv...)
 	// Not bound to ctx: the agent must outlive the TUI.
 	cmd := exec.CommandContext(context.Background(), a.exe, args...) // #nosec G204 -- tower itself with the configured run_command
 	// The wrapper's command inherits the directory.

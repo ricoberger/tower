@@ -26,7 +26,7 @@ func TestExecDoesNotRunRecoveredSession(t *testing.T) {
 				t.Fatal(err)
 			}
 			marker := filepath.Join(dir, "command-ran")
-			code := Exec(fakeNotifier{}, s, it.ID, "session", it.Title, []string{"sh", "-c", `printf ran > "$0"`, marker})
+			code := Exec(s, it.ID, "session", []string{"sh", "-c", `printf ran > "$0"`, marker})
 			if code != 127 {
 				t.Fatalf("exit code = %d", code)
 			}
@@ -54,7 +54,7 @@ func TestExecContinuesClaimedResolvedSession(t *testing.T) {
 	if err := s.Move(ctx, it.ID, store.StateDone, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if code := Exec(fakeNotifier{}, s, it.ID, "session", it.Title, []string{"sh", "-c", "exit 3"}); code != 3 {
+	if code := Exec(s, it.ID, "session", []string{"sh", "-c", "exit 3"}); code != 3 {
 		t.Fatalf("exit code = %d", code)
 	}
 	got, err := s.Get(ctx, it.ID)
