@@ -49,8 +49,12 @@ type Model struct {
 	details       int64
 	detailsScroll int
 	detailsCache  detailsCache
-	log           *slog.Logger
-	now           func() time.Time
+	// running holds the session of every IN PROGRESS item of the last load,
+	// notified the last session a notification was sent for, both by item ID.
+	running  map[int64]string
+	notified map[int64]string
+	log      *slog.Logger
+	now      func() time.Time
 }
 
 // New creates the model. Failed actions are written to log.
@@ -96,10 +100,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.log.Warn("load items", "err", msg.err)
 			return m, nil
 		}
+		notify := m.notifications(msg.items)
 		m.setItems(msg.items)
 		if _, ok := m.detailsItem(); !ok {
 			m.details = 0
 		}
+		return m, notify
 	case resultMsg:
 		return m, m.load()
 	case tea.KeyPressMsg:

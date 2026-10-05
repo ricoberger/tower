@@ -29,10 +29,9 @@ design — do not implement from them.
 | `internal/provider/pullrequests` | Pull requests provider: config and validation in `New`, `gh search prs` runner (injectable for tests, no shell, `--` before the query terms, `updated:>=` from `max_age`), pull request → item conversion, prompt, `Poll` loop |
 | `internal/provider/jira` | Jira provider: config and validation in `New`, `acli jira workitem search` runner (injectable for tests, no shell, JQL as one argument, `--paginate`), strict decoding of key/status category, issue → item conversion, browse URL from the site in acli's `jira_config.yaml`, built-in ADF → Markdown description renderer (`adf.go`), prompt, `Poll` loop |
 | `internal/provider/tasks` | Tasks provider (no polling): config, parses editor text into tasks, prompt |
-| `internal/agent` | Agent config (`Config`: `run_command`/`resume_command`/`working_dir`, both commands run in `working_dir`), shell-like command splitting and Go-template commands (`shquote`). Starts agents via the detached `tower exec` wrapper (passes the title for the notification), the wrapper itself (`Exec`), resume, PID liveness |
-| `internal/notify` | macOS notifications via osascript |
+| `internal/agent` | Agent config (`Config`: `run_command`/`resume_command`/`working_dir`, both commands run in `working_dir`), shell-like command splitting and Go-template commands (`shquote`). Starts agents via the detached `tower exec` wrapper, the wrapper itself (`Exec`), resume, PID liveness |
 | `internal/app` | Config (`retention`). Consumes source updates into the store (poll errors are logged), retention loop; implements `ui.Backend` |
-| `internal/ui` | Bubble Tea TUI: four kanban columns (one per state; cards with title, time in state and description) a details popup (`K`, composited with lipgloss layers, Markdown rendered with glamour) and a statusline with the keys; failed actions are logged |
+| `internal/ui` | Bubble Tea TUI: four kanban columns (one per state; cards with title, time in state and description) a details popup (`K`, composited with lipgloss layers, Markdown rendered with glamour) and a statusline with the keys; failed actions are logged; OSC 777 terminal notifications (`notify.go`) |
 
 New item kinds (e.g. GitLab merge requests) are a self-contained package under
 `internal/provider/<kind>` implementing `provider.Provider`, registered in the
@@ -134,7 +133,12 @@ User-visible behavior that changes must stay consistent with these rules
   stopped. User moves (`t`, `d`) never stop agents either.
 - `p` always starts a new session; `r` reuses the stored session (TO DO,
   WAITING or DONE, including after `t`) and never changes state.
-- The macOS notification is shown only when a run moves its item to WAITING.
+- The TUI sends an OSC 777 terminal notification (via `tea.Raw`, so Ghostty
+  focuses tower's tab on click) when a session it saw IN PROGRESS is WAITING
+  on a later load: finished runs as well as dead-wrapper recoveries. The
+  `tower exec` wrapper has no terminal and never notifies; runs that finish
+  while the TUI is not running are not notified. Each session is notified at
+  most once; item titles are stripped of control characters.
 
 ### Agent commands
 
@@ -233,7 +237,7 @@ User-visible behavior that changes must stay consistent with these rules
 
 - Use temp directories for state and config. Never touch the real
   `~/.config/tower`, Grafana, GitHub (`gh`), Copilot or desktop notifications
-  (tests pass a fake `agent.Notifier` to `Exec` and a fake runner to the pull
+  (UI tests inspect the `tea.Raw` sequences; tests pass a fake runner to the pull
   requests provider). Jira tests never read the real `~/.config/acli`: their
   `TestMain` points `$HOME` at a temp directory and tests set the provider's
   site config path to temp files.

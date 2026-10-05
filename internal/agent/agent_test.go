@@ -23,24 +23,17 @@ func TestMain(m *testing.M) {
 		stateDir := fs.String("state-dir", "", "")
 		item := fs.String("item", "", "")
 		session := fs.String("session", "", "")
-		title := fs.String("title", "", "")
 		_ = fs.Parse(os.Args[2:])
 		id, _ := strconv.ParseInt(*item, 10, 64)
 		s, err := store.New(*stateDir)
 		if err != nil {
 			os.Exit(1)
 		}
-		code := Exec(fakeNotifier{}, s, id, *session, *title, fs.Args())
+		code := Exec(s, id, *session, fs.Args())
 		_ = s.Close()
 		os.Exit(code)
 	}
 	os.Exit(m.Run())
-}
-
-type fakeNotifier struct{}
-
-func (fakeNotifier) Send(string, string, string) error {
-	return nil
 }
 
 func setup(t *testing.T, run, resume string) (*Agent, *store.Store, string) {
